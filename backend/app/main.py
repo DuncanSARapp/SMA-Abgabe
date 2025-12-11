@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 import os
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,8 +18,37 @@ from services.document_processor import DocumentProcessor
 from services.rag_service import RAGService
 from services.file_handler import FileHandler
 
+# Initialize services
+embedding_service = None
+vector_store_service = None
+reranker_service = None
+doc_processor = None
+rag_service = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize services on startup"""
+    global embedding_service, vector_store_service, reranker_service, doc_processor, rag_service
+    
+    # Startup
+    init_db()
+    os.makedirs(settings.data_dir, exist_ok=True)
+    
+    embedding_service = EmbeddingService()
+    vector_store_service = VectorStoreService(embedding_service)
+    reranker_service = RerankerService()
+    doc_processor = DocumentProcessor()
+    rag_service = RAGService(vector_store_service, reranker_service, doc_processor)
+    
+    yield
+    
+    # Shutdown (cleanup if needed)
+
+
 # Initialize FastAPI app
-app = FastAPI(title="RAG System API", version="1.0.0")
+app = FastAPI(title="RAG System API", version="1.0.0", lifespan=lifespan)
+
 
 # CORS middleware
 app.add_middleware(
@@ -28,20 +58,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Initialize services
-embedding_service = EmbeddingService()
-vector_store_service = VectorStoreService(embedding_service)
-reranker_service = RerankerService()
-doc_processor = DocumentProcessor()
-rag_service = RAGService(vector_store_service, reranker_service, doc_processor)
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize database on startup"""
-    init_db()
-    os.makedirs(settings.data_dir, exist_ok=True)
 
 
 @app.get("/")

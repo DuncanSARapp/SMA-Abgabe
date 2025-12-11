@@ -1,8 +1,11 @@
 import os
 import pickle
+import logging
 from typing import List, Dict, Any
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentProcessor:
@@ -60,5 +63,5 @@ class DocumentProcessor:
                 parent_docs = pickle.load(f)
             return parent_docs[parent_id] if parent_id < len(parent_docs) else ""
         except Exception as e:
-            print(f"Error loading parent document: {e}")
+            logger.error(f"Error loading parent document from {pickle_path}: {e}")
             return ""

@@ -1,4 +1,6 @@
 // API Configuration
+// Note: For production, set API_BASE via environment variable or config file
+// Current detection is for development convenience only
 const API_BASE = window.location.hostname === 'localhost' 
     ? 'http://localhost:8000'
     : '/api';

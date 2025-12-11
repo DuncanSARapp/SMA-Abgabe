@@ -36,7 +36,7 @@ class VectorStoreService:
         """Create collection if it doesn't exist"""
         try:
             self.client.get_collection(self.collection_name)
-        except:
+        except Exception as e:
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(

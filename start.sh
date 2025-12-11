@@ -19,7 +19,7 @@ if [ ! -f .env ]; then
     echo "   nano .env"
     echo ""
     echo "Press Enter after you've configured your API key..."
-    read
+    read -r
 fi
 
 # Check if Docker is running

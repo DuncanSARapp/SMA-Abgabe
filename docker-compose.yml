@@ -1,3 +1,11 @@
+# Docker Compose configuration for RAG System
+# Note: This configuration is for development. For production:
+# - Use Docker secrets for sensitive data (API keys, passwords)
+# - Change default passwords
+# - Enable HTTPS
+# - Add resource limits
+# - Configure proper logging
+
 services:
   postgres:
     image: postgres:15-alpine
@@ -39,6 +47,8 @@ services:
       DATABASE_URL: postgresql://raguser:ragpass@postgres:5432/ragdb
       QDRANT_HOST: qdrant
       QDRANT_PORT: 6333
+      # WARNING: Environment variables are visible in container inspection
+      # For production, use Docker secrets or a secure secret manager
       LLM_API_KEY: ${LLM_API_KEY}
       LLM_API_BASE: ${LLM_API_BASE:-https://api.openai.com/v1}
       LLM_MODEL: ${LLM_MODEL:-gpt-3.5-turbo}
