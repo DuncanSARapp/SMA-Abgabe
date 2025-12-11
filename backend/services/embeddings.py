@@ -1,5 +1,7 @@
 import os
 import pickle
+import uuid
+import logging
 from typing import List, Dict, Any
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
@@ -23,6 +25,9 @@ class EmbeddingService:
         return self.model.encode(texts).tolist()
 
 
+logger = logging.getLogger(__name__)
+
+
 class VectorStoreService:
     """Service for managing Qdrant vector store"""
     
@@ -33,7 +38,7 @@ class VectorStoreService:
         self._ensure_collection()
     
     def _ensure_collection(self):
-        """Create collection if it doesn't exist or update mismatched dimensions"""
+        """Create collection if missing or update mismatched dimensions"""
         try:
             info = self.client.get_collection(self.collection_name)
             vectors_config = getattr(info.config.params, "vectors", None)
@@ -41,16 +46,29 @@ class VectorStoreService:
             current_size = None
             if hasattr(vectors_config, "size"):
                 current_size = vectors_config.size
-            elif isinstance(vectors_config, dict):
-                # Handle scalar and named vector configurations
-                if "size" in vectors_config:
-                    current_size = vectors_config["size"]
-                elif "default" in vectors_config and "size" in vectors_config["default"]:
-                    current_size = vectors_config["default"]["size"]
+            elif hasattr(vectors_config, "default") and vectors_config.default is not None:
+                current_size = getattr(vectors_config.default, "size", None)
+            elif hasattr(vectors_config, "dict"):
+                # Fall back to dict representation provided by pydantic models
+                vc_dict = vectors_config.dict()
+                if isinstance(vc_dict, dict):
+                    if "size" in vc_dict:
+                        current_size = vc_dict.get("size")
+                    elif "default" in vc_dict and isinstance(vc_dict["default"], dict):
+                        current_size = vc_dict["default"].get("size")
 
-            if current_size and current_size != self.embedding_service.dimension:
-                self.client.delete_collection(self.collection_name)
-                self.client.create_collection(
+            if current_size is None:
+                logger.warning("Unable to determine existing Qdrant vector size; recreating collection %s", self.collection_name)
+                raise ValueError("Unknown vector size")
+
+            if current_size != self.embedding_service.dimension:
+                logger.info(
+                    "Recreating Qdrant collection %s to adjust dimensionality %s -> %s",
+                    self.collection_name,
+                    current_size,
+                    self.embedding_service.dimension,
+                )
+                self.client.recreate_collection(
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(
                         size=self.embedding_service.dimension,
@@ -58,7 +76,7 @@ class VectorStoreService:
                     )
                 )
         except Exception:
-            self.client.create_collection(
+            self.client.recreate_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(
                     size=self.embedding_service.dimension,
@@ -69,24 +87,42 @@ class VectorStoreService:
     def add_documents(self, doc_id: int, chunks: List[Dict[str, Any]]) -> None:
         """Add document chunks to vector store"""
         points = []
-        for i, chunk in enumerate(chunks):
+        for idx, chunk in enumerate(chunks):
             embedding = self.embedding_service.embed_text(chunk['text'])
+            chunk_id = chunk.get('chunk_id', idx)
             point = PointStruct(
-                id=f"{doc_id}_{i}",
+                id=str(uuid.uuid4()),
                 vector=embedding,
                 payload={
                     'doc_id': doc_id,
-                    'chunk_id': i,
+                    'chunk_id': chunk_id,
                     'text': chunk['text'],
                     'parent_id': chunk.get('parent_id')
                 }
             )
             points.append(point)
         
-        self.client.upsert(
-            collection_name=self.collection_name,
-            points=points
-        )
+        try:
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=points
+            )
+        except Exception as exc:
+            if "vector dimension" in str(exc).lower() or "size" in str(exc).lower():
+                logger.warning("Qdrant collection dimension mismatch detected; recreating collection and retrying")
+                self.client.recreate_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=VectorParams(
+                        size=self.embedding_service.dimension,
+                        distance=Distance.COSINE
+                    )
+                )
+                self.client.upsert(
+                    collection_name=self.collection_name,
+                    points=points
+                )
+            else:
+                raise
     
     def search(self, query: str, top_k: int = 20) -> List[Dict[str, Any]]:
         """Search for similar documents"""

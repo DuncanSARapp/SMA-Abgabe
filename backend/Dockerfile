@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Download embedding model and reranker on build
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('mixedbread-ai/deepset-mxbai-embed-de-large-v1')"
-RUN python -c "from FlagEmbedding import FlagReranker; FlagReranker('BAAI/bge-reranker-v2-m3', use_fp16=False)"
+RUN python -c "from sentence_transformers import CrossEncoder; CrossEncoder('BAAI/bge-reranker-v2-m3')"
 
 # Copy application code
 COPY . .

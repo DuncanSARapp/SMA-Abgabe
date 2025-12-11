@@ -9,7 +9,7 @@ python-multipart==0.0.6
 
 # LangChain and related
 langchain==0.1.5
-langchain-community==0.0.16
+langchain-community==0.0.17
 langchain-openai==0.0.3
 qdrant-client==1.7.3
 
@@ -21,8 +21,7 @@ tiktoken==0.5.2
 
 # Embeddings and reranking
 sentence-transformers==2.3.1
-torch==2.1.2
-FlagEmbedding==1.2.10
+torch==2.4.1
 
 # Utilities
 python-dotenv==1.0.0

@@ -49,7 +49,12 @@ class QueryRequest(BaseModel):
     query: str
 
 
+class SourceDetail(BaseModel):
+    label: str
+    content: str
+
+
 class QueryResponse(BaseModel):
     answer: str
-    sources: List[str]
+    sources: List[SourceDetail]
     message_id: int

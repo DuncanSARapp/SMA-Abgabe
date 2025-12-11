@@ -63,7 +63,7 @@ REQUIREMENTS FULFILLED
    - Chat history context
 
 ✅ Local Reranker
-   - Cross-encoder model (FlagReranker)
+   - Cross-encoder model (sentence-transformers)
    - BAAI/bge-reranker-v2-m3
    - Top-20 → Top-5 reranking
    - CPU-based inference

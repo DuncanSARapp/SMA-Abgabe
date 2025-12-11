@@ -137,6 +137,46 @@ body {
     line-height: 1.5;
 }
 
+.message-content p,
+.message-content ul,
+.message-content ol,
+.message-content pre {
+    margin: 8px 0;
+}
+
+.message-content ul,
+.message-content ol {
+    padding-left: 20px;
+}
+
+.message-content a {
+    color: inherit;
+    text-decoration: underline;
+}
+
+.message-content code {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    background-color: rgba(0, 0, 0, 0.08);
+    padding: 2px 4px;
+    border-radius: 4px;
+}
+
+.message-content pre {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    background-color: rgba(0, 0, 0, 0.08);
+    padding: 12px;
+    border-radius: 8px;
+    overflow-x: auto;
+}
+
+.message.user .message-content pre {
+    background-color: rgba(255, 255, 255, 0.2);
+}
+
+.message.user .message-content code {
+    background-color: rgba(255, 255, 255, 0.2);
+}
+
 .message.user .message-content {
     background-color: #3498db;
     color: white;
@@ -168,6 +208,33 @@ body {
 .message-sources strong {
     display: block;
     margin-bottom: 4px;
+}
+
+.message-sources details {
+    margin-top: 6px;
+    border: 1px solid #d9e2ec;
+    border-radius: 6px;
+    background-color: #fff;
+}
+
+.message-sources details summary {
+    cursor: pointer;
+    padding: 6px 10px;
+    font-weight: 600;
+    list-style: none;
+}
+
+.message-sources details[open] summary {
+    border-bottom: 1px solid #d9e2ec;
+}
+
+.message-sources details pre {
+    margin: 0;
+    padding: 10px;
+    font-size: 12px;
+    background-color: #f6f8fa;
+    border-radius: 0 0 6px 6px;
+    white-space: pre-wrap;
 }
 
 .input-area {

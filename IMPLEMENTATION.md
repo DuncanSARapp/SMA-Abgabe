@@ -112,7 +112,7 @@ A complete Retrieval-Augmented Generation (RAG) system with:
   - Metadata handling
 
 ✅ **reranker.py** - Reranking Service
-- Cross-encoder reranking via FlagReranker
+- Cross-encoder reranking via sentence-transformers
 - Model: BAAI/bge-reranker-v2-m3
 - Score-based reranking
 - Configurable top-k
@@ -300,7 +300,7 @@ A complete Retrieval-Augmented Generation (RAG) system with:
 
 ### ✅ Local Models
 - Embedding: sentence-transformers (mixedbread-ai/deepset-mxbai-embed-de-large-v1)
-- Reranker: FlagReranker (BAAI/bge-reranker-v2-m3)
+- Reranker: CrossEncoder (BAAI/bge-reranker-v2-m3)
 - No external API calls for embeddings/reranking
 - CPU-based inference
 - Models downloaded during Docker build

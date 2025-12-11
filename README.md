@@ -11,7 +11,7 @@ A Docker-Compose-based RAG (Retrieval-Augmented Generation) system with:
 - **Web Frontend** for multi-chat interface and document upload
 - **Parent Document Retriever** with pickle files
 - **Local Embedding Model** (mixedbread-ai/deepset-mxbai-embed-de-large-v1)
-- **Local Reranker** (BAAI/bge-reranker-v2-m3 via FlagReranker)
+- **Local Reranker** (BAAI/bge-reranker-v2-m3 cross-encoder)
 - **API-based LLM** (OpenAI-compatible)
 
 ## Features

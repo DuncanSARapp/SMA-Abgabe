@@ -201,7 +201,7 @@ Error downloading model
 - Download models manually:
   ```bash
   docker compose run backend python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('mixedbread-ai/deepset-mxbai-embed-de-large-v1')"
-  docker compose run backend python -c "from FlagEmbedding import FlagReranker; FlagReranker('BAAI/bge-reranker-v2-m3', use_fp16=False)"
+  docker compose run backend python -c "from sentence_transformers import CrossEncoder; CrossEncoder('BAAI/bge-reranker-v2-m3')"
   ```
 
 ## Getting Help

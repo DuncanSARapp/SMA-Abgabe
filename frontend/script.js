@@ -162,7 +162,7 @@ async function loadMessages(chatId) {
 
 function renderMessages(messages) {
     messagesContainer.innerHTML = '';
-    
+
     if (messages.length === 0) {
         messagesContainer.innerHTML = `
             <div class="welcome-message">
@@ -172,21 +172,14 @@ function renderMessages(messages) {
         `;
         return;
     }
-    
+
     messages.forEach(message => {
-        const messageDiv = document.createElement('div');
-        messageDiv.className = `message ${message.role}`;
-        
-        const time = new Date(message.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-        
-        messageDiv.innerHTML = `
-            <div class="message-content">${escapeHtml(message.content)}</div>
-            <div class="message-time">${time}</div>
-        `;
-        
-        messagesContainer.appendChild(messageDiv);
+        const elements = createMessageElement(message.role, message.content, {
+            timestamp: message.created_at
+        });
+        messagesContainer.appendChild(elements.messageDiv);
     });
-    
+
     scrollToBottom();
 }
 
@@ -200,24 +193,14 @@ async function sendQuery() {
     
     // Add user message to UI immediately
     addMessageToUI('user', query);
-    
+
     try {
-        showLoading('Thinking...');
-        const response = await apiCall('/query', 'POST', {
-            chat_id: currentChatId,
-            query: query
-        });
-        
-        hideLoading();
-        
-        // Add assistant message to UI
-        addMessageToUI('assistant', response.answer, response.sources);
-        
+        const assistantElements = addMessageToUI('assistant', '');
+        await streamQuery(query, assistantElements);
         queryInput.disabled = false;
         sendBtn.disabled = false;
         queryInput.focus();
     } catch (error) {
-        hideLoading();
         showToast('Failed to get response', 'error');
         console.error(error);
         queryInput.disabled = false;
@@ -231,29 +214,10 @@ function addMessageToUI(role, content, sources = null) {
         welcomeMsg.remove();
     }
     
-    const messageDiv = document.createElement('div');
-    messageDiv.className = `message ${role}`;
-    
-    const time = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-    
-    let sourcesHtml = '';
-    if (sources && sources.length > 0) {
-        sourcesHtml = `
-            <div class="message-sources">
-                <strong>Sources:</strong>
-                ${sources.map(s => `• ${escapeHtml(s)}`).join('<br>')}
-            </div>
-        `;
-    }
-    
-    messageDiv.innerHTML = `
-        <div class="message-content">${escapeHtml(content)}</div>
-        <div class="message-time">${time}</div>
-        ${sourcesHtml}
-    `;
-    
-    messagesContainer.appendChild(messageDiv);
+    const elements = createMessageElement(role, content, { sources });
+    messagesContainer.appendChild(elements.messageDiv);
     scrollToBottom();
+    return elements;
 }
 
 async function deleteCurrentChat() {
@@ -385,8 +349,147 @@ function scrollToBottom() {
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
 
+function createMessageElement(role, content, options = {}) {
+    const { sources = null, timestamp = null } = options;
+    const messageDiv = document.createElement('div');
+    messageDiv.className = `message ${role}`;
+
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'message-content';
+    contentDiv.innerHTML = renderMarkdown(content);
+
+    const timeDiv = document.createElement('div');
+    timeDiv.className = 'message-time';
+    const date = timestamp ? new Date(timestamp) : new Date();
+    timeDiv.textContent = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    messageDiv.appendChild(contentDiv);
+    messageDiv.appendChild(timeDiv);
+
+    let sourcesContainer = null;
+    if (sources && sources.length > 0) {
+        sourcesContainer = buildSourcesElement(sources);
+        messageDiv.appendChild(sourcesContainer);
+    }
+
+    return { messageDiv, contentDiv, sourcesContainer, timeDiv };
+}
+
+function buildSourcesElement(sources) {
+    const container = document.createElement('div');
+    container.className = 'message-sources';
+
+    const title = document.createElement('strong');
+    title.textContent = 'Sources:';
+    container.appendChild(title);
+
+    sources.forEach((source, index) => {
+        const isObject = source && typeof source === 'object';
+        const label = isObject ? (source.label || `Source ${index + 1}`) : String(source);
+        const contentText = isObject ? (source.content || '') : '';
+
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = label;
+        details.appendChild(summary);
+
+        const content = document.createElement('pre');
+        content.textContent = contentText;
+        if (contentText) {
+            details.appendChild(content);
+        }
+
+        container.appendChild(details);
+    });
+
+    return container;
+}
+
+function renderMarkdown(text = '') {
+    if (!text) {
+        return '';
+    }
+    const html = marked.parse(text, { breaks: true });
+    return DOMPurify.sanitize(html);
+}
+
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+async function streamQuery(query, assistantElements) {
+    const response = await fetch(`${API_BASE}/query/stream`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            chat_id: currentChatId,
+            query,
+        }),
+    });
+
+    if (!response.ok || !response.body) {
+        throw new Error('Streaming request failed');
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let accumulated = '';
+
+    while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+            break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+
+        let separatorIndex;
+        while ((separatorIndex = buffer.indexOf('\n\n')) !== -1) {
+            const rawEvent = buffer.slice(0, separatorIndex).trim();
+            buffer = buffer.slice(separatorIndex + 2);
+
+            if (!rawEvent.startsWith('data:')) {
+                continue;
+            }
+
+            const dataString = rawEvent.replace(/^data:\s*/, '');
+            if (!dataString) {
+                continue;
+            }
+
+            let payload;
+            try {
+                payload = JSON.parse(dataString);
+            } catch (err) {
+                console.error('Failed to parse SSE payload', err);
+                continue;
+            }
+
+            if (payload.type === 'chunk') {
+                if (payload.content) {
+                    accumulated += payload.content;
+                    assistantElements.contentDiv.innerHTML = renderMarkdown(accumulated);
+                    scrollToBottom();
+                }
+            } else if (payload.type === 'end') {
+                accumulated = payload.content || accumulated;
+                assistantElements.contentDiv.innerHTML = renderMarkdown(accumulated);
+                if (payload.sources && payload.sources.length > 0) {
+                    if (assistantElements.sourcesContainer) {
+                        assistantElements.sourcesContainer.remove();
+                    }
+                    assistantElements.sourcesContainer = buildSourcesElement(payload.sources);
+                    assistantElements.messageDiv.appendChild(assistantElements.sourcesContainer);
+                }
+                scrollToBottom();
+            } else if (payload.type === 'error') {
+                throw new Error(payload.message || 'Streaming error');
+            }
+        }
+    }
 }

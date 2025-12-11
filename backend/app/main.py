@@ -1,14 +1,17 @@
 from contextlib import asynccontextmanager
+import json
+import logging
 import os
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List
 
 from app.database import get_db, init_db
 from models.database import Chat, Message, Document
 from models.schemas import (
-    ChatCreate, ChatResponse, MessageResponse, 
+    ChatCreate, ChatResponse, MessageResponse,
     QueryRequest, QueryResponse, DocumentUploadResponse
 )
 from config.settings import settings
@@ -24,6 +27,8 @@ vector_store_service = None
 reranker_service = None
 doc_processor = None
 rag_service = None
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -155,6 +160,7 @@ async def upload_document(
         
     except Exception as e:
         db.rollback()
+        logger.exception("Failed to process document %s: %s", file.filename, e)
         raise HTTPException(status_code=500, detail=f"Error processing document: {str(e)}")
 
 
@@ -166,6 +172,10 @@ async def list_documents(db: Session = Depends(get_db)):
 
 
 # Query endpoint
+def _format_sse_event(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
 @app.post("/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest, db: Session = Depends(get_db)):
     """Query documents using RAG"""
@@ -212,6 +222,91 @@ async def query_documents(request: QueryRequest, db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
+
+
+@app.post("/query/stream")
+async def query_documents_stream(request: QueryRequest, db: Session = Depends(get_db)):
+    """Stream query responses for incremental rendering on the frontend."""
+    try:
+        chat = db.query(Chat).filter(Chat.id == request.chat_id).first()
+        if not chat:
+            raise HTTPException(status_code=404, detail="Chat not found")
+
+        messages = db.query(Message).filter(Message.chat_id == request.chat_id).order_by(Message.created_at).all()
+        chat_history = [{"role": msg.role, "content": msg.content} for msg in messages]
+
+        user_message = Message(
+            chat_id=request.chat_id,
+            content=request.query,
+            role="user"
+        )
+        db.add(user_message)
+        db.commit()
+
+        contexts, sources = rag_service.retrieve_and_rerank(request.query, db)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.exception("Failed to prepare streaming response: %s", e)
+        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
+
+    def event_generator():
+        accumulated_answer = ""
+        try:
+            if not contexts:
+                answer_text = "I couldn't find relevant information in the documents to answer your question."
+                assistant_message = Message(
+                    chat_id=request.chat_id,
+                    content=answer_text,
+                    role="assistant"
+                )
+                db.add(assistant_message)
+                db.commit()
+                db.refresh(assistant_message)
+                yield _format_sse_event({
+                    "type": "end",
+                    "content": answer_text,
+                    "sources": [],
+                    "message_id": assistant_message.id
+                })
+                return
+
+            for token in rag_service.generate_answer_stream(request.query, contexts, chat_history):
+                if not token:
+                    continue
+                accumulated_answer += token
+                yield _format_sse_event({
+                    "type": "chunk",
+                    "content": token
+                })
+
+            assistant_message = Message(
+                chat_id=request.chat_id,
+                content=accumulated_answer,
+                role="assistant"
+            )
+            db.add(assistant_message)
+            db.commit()
+            db.refresh(assistant_message)
+
+            yield _format_sse_event({
+                "type": "end",
+                "content": accumulated_answer,
+                "sources": sources,
+                "message_id": assistant_message.id
+            })
+
+        except Exception as stream_error:
+            db.rollback()
+            logger.exception("Streaming query failed: %s", stream_error)
+            yield _format_sse_event({
+                "type": "error",
+                "message": "Error processing query"
+            })
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":

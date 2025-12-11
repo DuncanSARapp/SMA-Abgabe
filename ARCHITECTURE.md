@@ -219,8 +219,8 @@ Query: "What is machine learning?"
 ### Reranker Model
 - **Name:** BAAI/bge-reranker-v2-m3
 - **Size:** ≈1.4 GB
-- **Type:** Cross-encoder (FlagReranker)
-- **Speed:** <1 second for a handful of documents on CPU
+- **Type:** Cross-encoder (sentence-transformers)
+- **Speed:** ~300ms for 20 documents (CPU)
 - **Purpose:** Improve retrieval relevance, optimized for multilingual (incl. German) queries
 
 ### LLM
