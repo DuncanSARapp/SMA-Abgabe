@@ -11,6 +11,11 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements first for better caching
 COPY requirements.txt .
+
+# Install CPU-only PyTorch first (smaller, ~200MB instead of 2GB)
+RUN pip install --no-cache-dir torch==2.4.1 --index-url https://download.pytorch.org/whl/cpu
+
+# Install remaining requirements
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Download embedding model and reranker on build

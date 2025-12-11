@@ -20,6 +20,7 @@ from services.reranker import RerankerService
 from services.document_processor import DocumentProcessor
 from services.rag_service import RAGService
 from services.file_handler import FileHandler
+from services.metadata_extractor import MetadataExtractor
 
 # Initialize services
 embedding_service = None
@@ -27,6 +28,7 @@ vector_store_service = None
 reranker_service = None
 doc_processor = None
 rag_service = None
+metadata_extractor = None
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +36,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize services on startup"""
-    global embedding_service, vector_store_service, reranker_service, doc_processor, rag_service
+    global embedding_service, vector_store_service, reranker_service, doc_processor, rag_service, metadata_extractor
     
     # Startup
     init_db()
@@ -45,6 +47,7 @@ async def lifespan(app: FastAPI):
     reranker_service = RerankerService()
     doc_processor = DocumentProcessor()
     rag_service = RAGService(vector_store_service, reranker_service, doc_processor)
+    metadata_extractor = MetadataExtractor()
     
     # Sync document status with Qdrant on startup
     sync_documents_with_qdrant()
@@ -168,12 +171,47 @@ async def upload_document(
         # Extract text
         text = FileHandler.extract_text(file_path)
         
-        # Process document
-        pickle_path = os.path.join(settings.data_dir, "pickles", f"doc_{db_document.id}.pkl")
-        chunks = doc_processor.process_document(db_document.id, text, pickle_path)
+        # Extract metadata using LLM
+        logger.info("Extracting metadata for document %s", file.filename)
+        metadata_chunk = None
+        try:
+            # Get first pages for metadata extraction
+            first_pages_text = FileHandler.extract_first_pages_text(file_path, num_pages=2)
+            
+            # Get PDF metadata if available
+            pdf_metadata = None
+            if file.filename.lower().endswith('.pdf'):
+                pdf_metadata = FileHandler.extract_pdf_metadata(file_path)
+            
+            # Extract structured metadata via LLM
+            extracted_metadata = metadata_extractor.extract_metadata_from_text(
+                first_pages_text, 
+                file.filename,
+                pdf_metadata
+            )
+            
+            # Create searchable metadata chunk
+            metadata_chunk = metadata_extractor.create_metadata_chunk(
+                extracted_metadata, 
+                file.filename
+            )
+            logger.info("Extracted metadata for %s: %s", file.filename, extracted_metadata)
+        except Exception as meta_error:
+            logger.warning("Failed to extract metadata for %s: %s", file.filename, meta_error)
+            # Continue without metadata - it's not critical
         
-        # Add to vector store
-        vector_store_service.add_documents(db_document.id, chunks)
+        # Process document with metadata chunk
+        pickle_path = os.path.join(settings.data_dir, "pickles", f"doc_{db_document.id}.pkl")
+        chunks = doc_processor.process_document(
+            db_document.id, 
+            text, 
+            pickle_path,
+            document_name=file.filename,
+            metadata_chunk=metadata_chunk
+        )
+        
+        # Add to vector store with document name
+        vector_store_service.add_documents(db_document.id, chunks, document_name=file.filename)
         
         # Update document record
         db_document.pickle_path = pickle_path
@@ -211,12 +249,39 @@ async def reprocess_document(doc_id: int, db: Session = Depends(get_db)):
         # Extract text
         text = FileHandler.extract_text(document.file_path)
         
-        # Process document
-        pickle_path = os.path.join(settings.data_dir, "pickles", f"doc_{document.id}.pkl")
-        chunks = doc_processor.process_document(document.id, text, pickle_path)
+        # Extract metadata using LLM
+        logger.info("Extracting metadata for reprocessed document %s", document.filename)
+        metadata_chunk = None
+        try:
+            first_pages_text = FileHandler.extract_first_pages_text(document.file_path, num_pages=2)
+            pdf_metadata = None
+            if document.filename.lower().endswith('.pdf'):
+                pdf_metadata = FileHandler.extract_pdf_metadata(document.file_path)
+            
+            extracted_metadata = metadata_extractor.extract_metadata_from_text(
+                first_pages_text, 
+                document.filename,
+                pdf_metadata
+            )
+            metadata_chunk = metadata_extractor.create_metadata_chunk(
+                extracted_metadata, 
+                document.filename
+            )
+        except Exception as meta_error:
+            logger.warning("Failed to extract metadata for %s: %s", document.filename, meta_error)
         
-        # Add to vector store
-        vector_store_service.add_documents(document.id, chunks)
+        # Process document with metadata
+        pickle_path = os.path.join(settings.data_dir, "pickles", f"doc_{document.id}.pkl")
+        chunks = doc_processor.process_document(
+            document.id, 
+            text, 
+            pickle_path,
+            document_name=document.filename,
+            metadata_chunk=metadata_chunk
+        )
+        
+        # Add to vector store with document name
+        vector_store_service.add_documents(document.id, chunks, document_name=document.filename)
         
         # Update document record
         document.pickle_path = pickle_path
