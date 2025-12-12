@@ -16,11 +16,16 @@ class Settings(BaseSettings):
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     
     chunk_size: int = 1000
-    chunk_overlap: int = 200
+    chunk_overlap: int = 180
+    child_chunk_overlap: int | None = None
     parent_chunk_size: int = 2000
+    parent_chunk_overlap: int = 400
+    use_docling_parser: bool = True
+    enable_neighbor_expansion: bool = True
+    neighbor_expansion_window: int = 4
     
     top_k_retrieval: int = 20
-    top_k_rerank: int = 5
+    top_k_rerank: int = 6
     
     data_dir: str = "/app/data"
     

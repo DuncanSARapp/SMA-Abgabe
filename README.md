@@ -174,7 +174,14 @@ The system uses a two-level chunking strategy:
 2. Top-K child chunks retrieved from Qdrant (K=20)
 3. Chunks are reranked for relevance (top 5)
 4. Parent documents are loaded from pickle files
-5. LLM generates answer based on parent contexts
+5. If there is remaining room (less than 5 sources), the system automatically appends the next section and then the previous section from the same document so that complete headings stay together (configurable).
+6. LLM generates answer based on parent contexts
+
+### Document Parsing
+
+- **PDFs** are parsed via [Docling](https://github.com/DS4SD/docling) to preserve headings, tables, and other structural cues before chunking. The Docling output is converted to Markdown so the semantic chunker can align child chunks with their parent sections.
+- If Docling is unavailable or `USE_DOCLING_PARSER=false`, the system falls back to `pypdf`-based text extraction.
+- DOCX/TXT/MD inputs continue to use their original parsers.
 
 ### Vector Store Layout
 

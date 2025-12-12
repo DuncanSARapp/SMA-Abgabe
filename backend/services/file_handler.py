@@ -1,16 +1,87 @@
+import logging
 import os
 import shutil
 from typing import BinaryIO, Dict, Any, Optional
 from pypdf import PdfReader
 from docx import Document as DocxDocument
+from config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 class FileHandler:
     """Utility for handling different file types"""
+
+    _docling_converter = None
+    _docling_disabled = False
+
+    @classmethod
+    def _get_docling_converter(cls):
+        if cls._docling_disabled or not settings.use_docling_parser:
+            return None
+        if cls._docling_converter is not None:
+            return cls._docling_converter
+
+        try:
+            from docling.document_converter import DocumentConverter
+
+            cls._docling_converter = DocumentConverter()
+            logger.info("Docling converter initialized for PDF parsing")
+        except Exception as exc:  # pragma: no cover - best-effort fallback
+            logger.warning(
+                "Docling unavailable, falling back to legacy PDF parser: %s",
+                exc,
+            )
+            cls._docling_disabled = True
+            cls._docling_converter = None
+
+        return cls._docling_converter
+
+    @classmethod
+    def _extract_pdf_with_docling(cls, file_path: str) -> Optional[str]:
+        converter = cls._get_docling_converter()
+        if converter is None:
+            return None
+
+        try:
+            try:
+                result = converter.convert(file_path)
+            except TypeError:
+                result = converter.convert(input_document=file_path)
+
+            document = getattr(result, "document", None)
+            if document is None:
+                return None
+
+            export_methods = [
+                "export_markdown",
+                "export_to_markdown",
+                "export_plaintext",
+                "export_to_text",
+            ]
+            for method_name in export_methods:
+                exporter = getattr(document, method_name, None)
+                if callable(exporter):
+                    text = exporter()
+                    if text:
+                        return text
+
+            return str(document)
+        except Exception as exc:  # pragma: no cover - converter handles many edge cases already
+            logger.warning(
+                "Docling conversion failed for %s, using fallback parser: %s",
+                file_path,
+                exc,
+            )
+            return None
     
     @staticmethod
     def extract_text_from_pdf(file_path: str) -> str:
         """Extract text from PDF file"""
+        docling_text = FileHandler._extract_pdf_with_docling(file_path)
+        if docling_text:
+            return docling_text
+        
         reader = PdfReader(file_path)
         text = ""
         for page in reader.pages:
@@ -46,6 +117,10 @@ class FileHandler:
         
         if ext == '.pdf':
             try:
+                docling_text = FileHandler._extract_pdf_with_docling(file_path)
+                if docling_text:
+                    return docling_text[:max_chars]
+                
                 reader = PdfReader(file_path)
                 text = ""
                 for i, page in enumerate(reader.pages[:num_pages]):
