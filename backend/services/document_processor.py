@@ -1,9 +1,11 @@
 import os
 import pickle
-import re
 import logging
 from typing import List, Dict, Any, Tuple
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.text_splitter import (
+    MarkdownHeaderTextSplitter,
+    RecursiveCharacterTextSplitter,
+)
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -13,45 +15,84 @@ class DocumentProcessor:
     """Service for processing and chunking documents with metadata extraction"""
     
     def __init__(self):
+        parent_overlap = getattr(settings, "parent_chunk_overlap", None) or settings.chunk_overlap
+        child_overlap = getattr(settings, "child_chunk_overlap", None) or settings.chunk_overlap
+
+        self.heading_keys = ["h1", "h2", "h3", "h4", "h5", "h6"]
+        self.header_splitter = MarkdownHeaderTextSplitter(
+            headers_to_split_on=[
+                ("#", "h1"),
+                ("##", "h2"),
+                ("###", "h3"),
+                ("####", "h4"),
+                ("#####", "h5"),
+                ("######", "h6"),
+            ]
+        )
         self.parent_splitter = RecursiveCharacterTextSplitter(
             chunk_size=settings.parent_chunk_size,
-            chunk_overlap=settings.chunk_overlap,
+            chunk_overlap=parent_overlap,
             length_function=len,
         )
         self.child_splitter = RecursiveCharacterTextSplitter(
             chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap,
+            chunk_overlap=child_overlap,
             length_function=len,
         )
     
-    def _extract_sections_from_markdown(self, text: str) -> List[Tuple[str, str]]:
-        """
-        Extract sections from markdown text with their headings.
-        Returns list of (section_heading, section_content) tuples.
-        """
-        # Pattern to match markdown headings (# to ######)
-        heading_pattern = r'^(#{1,6})\s+(.+)$'
-        lines = text.split('\n')
-        sections = []
-        current_heading = "Introduction"
-        current_content = []
-        
-        for line in lines:
-            match = re.match(heading_pattern, line)
-            if match:
-                # Save previous section
-                if current_content:
-                    sections.append((current_heading, '\n'.join(current_content)))
-                current_heading = match.group(2).strip()
-                current_content = [line]
-            else:
-                current_content.append(line)
-        
-        # Don't forget the last section
-        if current_content:
-            sections.append((current_heading, '\n'.join(current_content)))
-        
+    def _segment_sections(self, text: str) -> List[Dict[str, str]]:
+        """Segment document into sections based on markdown headings."""
+        documents = self.header_splitter.split_text(text)
+        sections: List[Dict[str, str]] = []
+
+        for doc in documents:
+            content = doc.page_content.strip()
+            if not content:
+                continue
+
+            metadata = doc.metadata or {}
+            heading_parts = [
+                metadata.get(level)
+                for level in self.heading_keys
+                if metadata.get(level)
+            ]
+            heading_path = " / ".join(heading_parts) if heading_parts else "Body"
+
+            sections.append({
+                "heading": heading_path,
+                "content": content,
+            })
+
+        if not sections:
+            sections.append({"heading": "Body", "content": text.strip()})
+
         return sections
+
+    def _build_parent_chunks(
+        self, sections: List[Dict[str, str]]
+    ) -> Tuple[List[str], List[str]]:
+        """Build parent chunks while respecting section boundaries."""
+        parent_docs: List[str] = []
+        parent_sections: List[str] = []
+
+        for section in sections:
+            content = section.get("content", "").strip()
+            heading_path = section.get("heading", "Body")
+
+            if not content:
+                continue
+
+            splits = self.parent_splitter.split_text(content)
+            for split in splits:
+                chunk_text = (
+                    f"{heading_path}\n\n{split}".strip()
+                    if heading_path != "Body"
+                    else split.strip()
+                )
+                parent_docs.append(chunk_text)
+                parent_sections.append(heading_path)
+
+        return parent_docs, parent_sections
     
     def _determine_position(self, chunk_index: int, total_chunks: int) -> str:
         """Determine if chunk is at beginning, middle, or end of document"""
@@ -66,12 +107,6 @@ class DocumentProcessor:
         else:
             return "middle"
     
-    def _find_section_for_text(self, text: str, sections: List[Tuple[str, str]]) -> str:
-        """Find which section a text chunk belongs to"""
-        for heading, content in sections:
-            if text[:100] in content:  # Check if start of chunk is in section
-                return heading
-        return "Unknown"
     
     def process_document(
         self, 
@@ -95,10 +130,10 @@ class DocumentProcessor:
             List of child chunks with parent_id references and metadata
         """
         # Extract section structure (works best for markdown, but provides fallback for others)
-        sections = self._extract_sections_from_markdown(text)
+        sections = self._segment_sections(text)
         
-        # Create parent documents
-        parent_docs = self.parent_splitter.split_text(text)
+        # Create parent documents while keeping heading metadata
+        parent_docs, parent_sections = self._build_parent_chunks(sections)
         
         # If we have a metadata chunk, prepend it as parent_id -1 (special metadata parent)
         if metadata_chunk:
@@ -113,6 +148,7 @@ class DocumentProcessor:
         
         # Create child chunks with metadata
         chunks = []
+        chunk_counter = 0
         
         # Add metadata chunk as a special searchable chunk (if present)
         if metadata_chunk:
@@ -123,12 +159,13 @@ class DocumentProcessor:
                 'document_name': document_name,
                 'section': 'Document Metadata',
                 'position': 'metadata',
-                'chunk_index': 0,
+                'chunk_index': chunk_counter,
                 'chunk_id': -1,  # Ensure metadata chunk has unique chunk_id
                 'is_metadata': True
             })
             # Offset for regular chunks
             parent_offset = 1
+            chunk_counter += 1
         else:
             parent_offset = 0
         
@@ -137,25 +174,25 @@ class DocumentProcessor:
         for parent_id, parent_text in enumerate(parent_docs):
             child_texts = self.child_splitter.split_text(parent_text)
             
-            # Find section for this parent
-            section = self._find_section_for_text(parent_text, sections)
-            
-            for child_idx, child_text in enumerate(child_texts):
-                global_chunk_index = sum(
-                    len(self.child_splitter.split_text(parent_docs[i])) 
-                    for i in range(parent_id)
-                ) + child_idx + (1 if metadata_chunk else 0)
-                
+            section = (
+                parent_sections[parent_id]
+                if parent_id < len(parent_sections)
+                else "Body"
+            )
+            position = self._determine_position(parent_id, total_parent_docs)
+
+            for child_text in child_texts:
                 chunks.append({
                     'text': child_text,
                     'parent_id': parent_id + parent_offset,  # Offset by 1 if metadata exists
                     'doc_id': doc_id,
                     'document_name': document_name,
                     'section': section,
-                    'position': self._determine_position(parent_id, total_parent_docs),
-                    'chunk_index': global_chunk_index,
+                    'position': position,
+                    'chunk_index': chunk_counter,
                     'is_metadata': False
                 })
+                chunk_counter += 1
         
         logger.info(
             "Processed document %s: %d parent chunks, %d child chunks%s",

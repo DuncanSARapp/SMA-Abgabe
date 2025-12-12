@@ -346,6 +346,8 @@ class VectorStoreService:
                     'document_name': hit.payload.get('document_name', ''),
                     'section': hit.payload.get('section', ''),
                     'position': hit.payload.get('position', ''),
+                    'chunk_index': hit.payload.get('chunk_index'),
+                    'total_chunks': hit.payload.get('total_chunks'),
                     'score': hit.score
                 })
 
@@ -371,10 +373,13 @@ class VectorStoreService:
                 'document_name': hit.payload.get('document_name', ''),
                 'section': hit.payload.get('section', ''),
                 'position': hit.payload.get('position', ''),
+                'chunk_index': hit.payload.get('chunk_index'),
+                'total_chunks': hit.payload.get('total_chunks'),
                 'score': hit.score
             }
             for hit in results
         ]
+
     
     def get_metadata_chunks_for_docs(self, doc_collection_map: Dict[int, str]) -> List[Dict[str, Any]]:
         """Retrieve metadata chunks for the selected documents."""
@@ -439,6 +444,8 @@ class VectorStoreService:
                 'document_name': hit.payload.get('document_name', ''),
                 'section': hit.payload.get('section', ''),
                 'position': hit.payload.get('position', ''),
+                'chunk_index': hit.payload.get('chunk_index'),
+                'total_chunks': hit.payload.get('total_chunks'),
                 'score': hit.score
             }
             for hit in results

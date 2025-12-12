@@ -156,6 +156,7 @@ class RAGService:
         
         return all_chunks, seen_chunk_keys
 
+
     def multi_query_retrieve_and_rerank(
         self, 
         original_query: str, 
@@ -314,8 +315,11 @@ class RAGService:
                     reranked = self.reranker.rerank(original_query, all_accumulated_chunks, top_k=settings.top_k_rerank)
                     round3_best_score = reranked[0].get('rerank_score', 0) if reranked else 0
                     
-                    emit_thinking("round3_score", f"Final best score: {round3_best_score:.3f}",
-                                 [{"text": c['text'][:80], "score": c.get('rerank_score', 0)} for c in reranked[:3]])
+                    emit_thinking(
+                        "round3_score",
+                        f"Final best score: {round3_best_score:.3f}",
+                        [{"text": c['text'][:80], "score": c.get('rerank_score', 0)} for c in reranked[:3]],
+                    )
                 else:
                     emit_thinking("round2_final", f"No improvement after Round 2, using best available results")
             else:
@@ -345,51 +349,176 @@ class RAGService:
         db: Session
     ) -> tuple[List[str], List[Dict[str, str]]]:
         """Load parent documents from reranked chunks with enhanced metadata."""
-        parent_contexts: List[str] = []
-        sources: List[Dict[str, str]] = []
-        seen_parents = set()
-        
+        entries: List[Dict[str, Any]] = []
+        seen_parents: set[tuple[int, int]] = set()
+        doc_cache: Dict[int, Document | None] = {}
+        doc_order_map: Dict[int, int] = {}
+        limit = max(settings.top_k_rerank, 1)
+
         for chunk in chunks:
-            doc_id = chunk['doc_id']
+            doc_id = chunk.get('doc_id')
             parent_id = chunk.get('parent_id')
-            
-            parent_key = f"{doc_id}_{parent_id}"
+            if doc_id is None or parent_id is None:
+                continue
+
+            parent_key = (doc_id, parent_id)
             if parent_key in seen_parents:
                 continue
-            seen_parents.add(parent_key)
-            
-            document = db.query(Document).filter(Document.id == doc_id).first()
+
+            document = doc_cache.get(doc_id)
+            if document is None:
+                document = db.query(Document).filter(Document.id == doc_id).first()
+                doc_cache[doc_id] = document
+
             if not document or not document.pickle_path:
                 continue
-            
+
             parent_text = self.doc_processor.load_parent_document(
-                document.pickle_path, 
-                parent_id
+                document.pickle_path,
+                parent_id,
             )
-            
-            if parent_text:
-                parent_contexts.append(parent_text)
-                
-                # Build enhanced source info with metadata
-                doc_name = chunk.get('document_name') or document.filename
-                section = chunk.get('section', '')
-                rerank_score = chunk.get('rerank_score', 0)
-                
-                # Create descriptive label
-                label_parts = [doc_name]
-                if section and section != "Unknown" and section != "Introduction":
-                    label_parts.append(f"§ {section}")
-                label_parts.append(f"(Relevanz: {rerank_score:.0%})")
-                
-                sources.append({
-                    "label": " - ".join(label_parts),
-                    "content": parent_text.strip(),
-                    "document": doc_name,
-                    "section": section,
-                    "score": f"{rerank_score:.3f}"
-                })
-        
+            if not parent_text:
+                continue
+
+            entry = {
+                'doc_id': doc_id,
+                'parent_id': parent_id,
+                'document': document,
+                'document_name': chunk.get('document_name') or document.filename,
+                'section': chunk.get('section', ''),
+                'position': chunk.get('position', ''),
+                'score': chunk.get('rerank_score', 0.0),
+                'text': parent_text,
+                'is_neighbor': False,
+                'neighbor_direction': 0,
+                'doc_order': doc_order_map.setdefault(doc_id, len(doc_order_map)),
+            }
+
+            entries.append(entry)
+            seen_parents.add(parent_key)
+
+            if len(entries) >= limit:
+                break
+
+        final_entries = self._expand_parent_neighbors(entries, doc_cache, doc_order_map, seen_parents)
+
+        parent_contexts = [entry['text'] for entry in final_entries]
+        sources: List[Dict[str, str]] = []
+
+        for entry in final_entries:
+            section = entry.get('section', '')
+            label_parts = [entry.get('document_name', 'Document')]
+            if section and section not in ("Unknown", "Introduction"):
+                label_parts.append(f"§ {section}")
+
+            if entry.get('is_neighbor'):
+                direction = entry.get('neighbor_direction', 0)
+                if direction > 0:
+                    label_parts.append("Folgeabschnitt")
+                elif direction < 0:
+                    label_parts.append("Vorabschnitt")
+                else:
+                    label_parts.append("Nachbarabschnitt")
+
+            score = entry.get('score', 0.0)
+            label_parts.append(f"(Relevanz: {score:.0%})")
+
+            sources.append({
+                "label": " - ".join(label_parts),
+                "content": entry['text'].strip(),
+                "document": entry.get('document_name', 'Document'),
+                "section": section,
+                "score": f"{score:.3f}"
+            })
+
         return parent_contexts, sources
+
+    def _expand_parent_neighbors(
+        self,
+        base_entries: List[Dict[str, Any]],
+        doc_cache: Dict[int, Document | None],
+        doc_order_map: Dict[int, int],
+        seen_parents: set[tuple[int, int]]
+    ) -> List[Dict[str, Any]]:
+        """Append parent-level neighbors (next, then previous) up to the source limit."""
+        limit = max(settings.top_k_rerank, 1)
+        if not settings.enable_neighbor_expansion or settings.neighbor_expansion_window <= 0:
+            return base_entries[:limit]
+
+        if len(base_entries) >= limit:
+            return base_entries[:limit]
+
+        expanded = list(base_entries)
+        window = settings.neighbor_expansion_window
+        base_snapshot = list(base_entries)
+
+        for entry in base_snapshot:
+            if len(expanded) >= limit:
+                break
+
+            document = entry.get('document') or doc_cache.get(entry['doc_id'])
+            if not document or not document.pickle_path:
+                continue
+
+            # Always try exactly one preceding section if available
+            if len(expanded) < limit:
+                prev_key = (entry['doc_id'], entry['parent_id'] - 1)
+                if prev_key[1] >= 0 and prev_key not in seen_parents:
+                    prev_text = self.doc_processor.load_parent_document(document.pickle_path, prev_key[1])
+                    if prev_text:
+                        expanded.append({
+                            'doc_id': entry['doc_id'],
+                            'parent_id': prev_key[1],
+                            'document': document,
+                            'document_name': entry.get('document_name'),
+                            'section': entry.get('section', ''),
+                            'position': entry.get('position', ''),
+                            'score': max(entry.get('score', 0.0) * 0.95, 0.0),
+                            'text': prev_text,
+                            'is_neighbor': True,
+                            'neighbor_direction': -1,
+                            'doc_order': doc_order_map.setdefault(entry['doc_id'], len(doc_order_map)),
+                        })
+                        seen_parents.add(prev_key)
+
+            # Fill the remaining slots with following sections only
+            for offset in range(1, window + 1):
+                if len(expanded) >= limit:
+                    break
+
+                next_key = (entry['doc_id'], entry['parent_id'] + offset)
+                if next_key in seen_parents:
+                    continue
+
+                next_text = self.doc_processor.load_parent_document(document.pickle_path, next_key[1])
+                if not next_text:
+                    continue
+
+                expanded.append({
+                    'doc_id': entry['doc_id'],
+                    'parent_id': next_key[1],
+                    'document': document,
+                    'document_name': entry.get('document_name'),
+                    'section': entry.get('section', ''),
+                    'position': entry.get('position', ''),
+                    'score': max(entry.get('score', 0.0) * 0.98, 0.0),
+                    'text': next_text,
+                    'is_neighbor': True,
+                    'neighbor_direction': 1,
+                    'doc_order': doc_order_map.setdefault(entry['doc_id'], len(doc_order_map)),
+                })
+                seen_parents.add(next_key)
+
+        reorder = any(entry.get('is_neighbor') for entry in expanded)
+        if reorder:
+            expanded.sort(key=lambda item: (
+                item.get('doc_order', 0),
+                item.get('parent_id', 0)
+            ))
+        else:
+            expanded.sort(key=lambda item: item.get('score', 0.0), reverse=True)
+
+        return expanded[:limit]
     
     def retrieve_and_rerank(
         self,
