@@ -235,14 +235,18 @@ async function sendQuery() {
     try {
         const assistantElements = addMessageToUI('assistant', '');
         await streamQuery(query, assistantElements);
+    } catch (error) {
+        const noDocsMessage = 'No active documents selected for querying';
+        if (error?.message && error.message.toLowerCase().includes(noDocsMessage.toLowerCase())) {
+            addAssistantInfoMessage('Bitte aktiviere mindestens ein Dokument in der rechten Liste (grüner Haken), bevor du eine Frage stellst.');
+        } else {
+            showToast('Failed to get response', 'error');
+            console.error(error);
+        }
+    } finally {
         queryInput.disabled = false;
         sendBtn.disabled = false;
         queryInput.focus();
-    } catch (error) {
-        showToast('Failed to get response', 'error');
-        console.error(error);
-        queryInput.disabled = false;
-        sendBtn.disabled = false;
     }
 }
 
@@ -255,6 +259,15 @@ function addMessageToUI(role, content, sources = null) {
     const elements = createMessageElement(role, content, { sources });
     messagesContainer.appendChild(elements.messageDiv);
     scrollToBottom();
+    return elements;
+}
+
+function addAssistantInfoMessage(content) {
+    const elements = addMessageToUI('assistant', content);
+    if (elements.thinkingContainer) {
+        elements.thinkingContainer.remove();
+        elements.thinkingContainer = null;
+    }
     return elements;
 }
 
@@ -319,13 +332,22 @@ function renderDocuments() {
         const isProcessed = doc.processed;
         const status = isProcessed ? 'processed' : 'unprocessed';
         const statusText = isProcessed ? `✓ ${doc.num_chunks} chunks` : '⚠ Not in vector store';
+        const queryPillClass = doc.query_enabled ? 'query-pill active' : 'query-pill inactive';
+        const toggleTitle = doc.query_enabled ? 'Included in retrieval' : 'Excluded from retrieval';
         
         docItem.innerHTML = `
             <div class="document-name">${escapeHtml(doc.filename)}</div>
-            <div class="document-info">${date}</div>
-            <div class="document-status ${status}">${statusText}</div>
+            <div class="document-info-row">
+                <span>${date}</span>
+                <span class="document-collection">${escapeHtml(doc.collection_name)}</span>
+            </div>
+            <div class="document-status-row">
+                <div class="document-status ${status}">${statusText}</div>
+                <div class="${queryPillClass}">${doc.query_enabled ? 'Query an' : 'Query aus'}</div>
+            </div>
             <div class="document-actions">
                 ${!isProcessed ? `<button class="btn-reprocess" data-id="${doc.id}">🔄 Reprocess</button>` : ''}
+                <button class="doc-toggle ${doc.query_enabled ? 'active' : ''}" data-id="${doc.id}" aria-pressed="${doc.query_enabled}" title="${toggleTitle}">${doc.query_enabled ? '✔' : ''}</button>
                 <button class="btn-delete-doc" data-id="${doc.id}">🗑️</button>
             </div>
         `;
@@ -334,6 +356,10 @@ function renderDocuments() {
         const reprocessBtn = docItem.querySelector('.btn-reprocess');
         if (reprocessBtn) {
             reprocessBtn.addEventListener('click', () => reprocessDocument(doc.id));
+        }
+        const toggleBtn = docItem.querySelector('.doc-toggle');
+        if (toggleBtn) {
+            toggleBtn.addEventListener('click', () => toggleDocumentQuery(doc.id, doc.query_enabled));
         }
         
         const deleteBtn = docItem.querySelector('.btn-delete-doc');
@@ -385,6 +411,20 @@ async function deleteDocument(docId) {
     } catch (error) {
         hideLoading();
         showToast('Failed to delete document', 'error');
+        console.error(error);
+    }
+}
+
+async function toggleDocumentQuery(docId, currentState) {
+    try {
+        const nextState = !currentState;
+        await apiCall(`/documents/${docId}/preferences`, 'PATCH', {
+            query_enabled: nextState,
+        });
+        await loadDocuments();
+        showToast(nextState ? 'Document enabled for queries' : 'Document excluded from queries', 'success');
+    } catch (error) {
+        showToast(error.message || 'Failed to update document', 'error');
         console.error(error);
     }
 }
@@ -547,7 +587,21 @@ async function streamQuery(query, assistantElements) {
     });
 
     if (!response.ok || !response.body) {
-        throw new Error('Streaming request failed');
+        let message = 'Streaming request failed';
+        try {
+            const errorPayload = await response.json();
+            if (errorPayload?.detail) {
+                message = errorPayload.detail;
+            }
+        } catch (parseError) {
+            // ignore JSON parse errors and fall back to default message
+        }
+        const error = new Error(message);
+        error.status = response.status;
+        if (message && message.toLowerCase().includes('no active documents selected')) {
+            error.isNoDocuments = true;
+        }
+        throw error;
     }
 
     const reader = response.body.getReader();
@@ -612,7 +666,11 @@ async function streamQuery(query, assistantElements) {
                 }
                 scrollToBottom();
             } else if (payload.type === 'error') {
-                throw new Error(payload.message || 'Streaming error');
+                const error = new Error(payload.message || 'Streaming error');
+                if (payload.message && payload.message.toLowerCase().includes('no active documents selected')) {
+                    error.isNoDocuments = true;
+                }
+                throw error;
             }
         }
     }

@@ -22,6 +22,7 @@ A Docker-Compose-based RAG (Retrieval-Augmented Generation) system with:
 - 📊 Parent-child document chunking strategy
 - 🎯 Reranking for improved relevance
 - 🌐 Web-based user interface
+- ✅ Document-specific Qdrant collections with per-file query toggles
 - 🔒 No authentication (as requested)
 
 ## Architecture
@@ -150,6 +151,15 @@ http://localhost:8000/docs
 - Switch between chats
 - Delete chats when no longer needed
 
+### 5. Control Document Participation
+
+Each uploaded document now owns its own Qdrant collection. Use the square toggle next to the trash icon in the documents panel to decide whether a document should be included in retrieval:
+
+1. Green checkmark = document is searchable.
+2. Gray square = document is excluded from queries (chunks stay on disk for later reactivation).
+
+Disabled documents are ignored by the retriever, which keeps responses scoped to the sources you explicitly selected.
+
 ## Technical Details
 
 ### Parent Document Retriever
@@ -165,6 +175,12 @@ The system uses a two-level chunking strategy:
 3. Chunks are reranked for relevance (top 5)
 4. Parent documents are loaded from pickle files
 5. LLM generates answer based on parent contexts
+
+### Vector Store Layout
+
+- Every document is stored in its own Qdrant collection named `doc_<document_id>`.
+- Startup synchronization marks database entries as unprocessed if their collection is missing and removes orphaned collections that have no corresponding document.
+- The UI toggle updates the `query_enabled` flag per document so that retrieval only touches the collections you explicitly selected.
 
 ### Models
 
@@ -263,6 +279,16 @@ Edit `backend/config/settings.py` to customize:
 - Check file format is supported (PDF, DOCX, TXT, MD)
 - Ensure file is not corrupted
 - Check backend logs: `docker-compose logs backend`
+
+### Issue: Column "query_enabled" does not exist
+
+**Solution**: Existing PostgreSQL databases need one new column. Run:
+
+```sql
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS query_enabled BOOLEAN DEFAULT TRUE;
+```
+
+Restart the backend afterwards so FastAPI picks up the new field.
 
 ## Data Persistence
 

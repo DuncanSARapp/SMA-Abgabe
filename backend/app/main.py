@@ -12,7 +12,8 @@ from app.database import get_db, init_db
 from models.database import Chat, Message, Document
 from models.schemas import (
     ChatCreate, ChatResponse, MessageResponse,
-    QueryRequest, QueryResponse, DocumentUploadResponse
+    QueryRequest, QueryResponse, DocumentUploadResponse,
+    DocumentPreferenceUpdate
 )
 from config.settings import settings
 from services.embeddings import EmbeddingService, VectorStoreService
@@ -62,22 +63,44 @@ def sync_documents_with_qdrant():
     from app.database import SessionLocal
     db = SessionLocal()
     try:
-        documents = db.query(Document).filter(Document.processed == True).all()
+        documents = db.query(Document).all()
         synced_count = 0
+        valid_collections: set[str] = set()
+
         for doc in documents:
-            if not vector_store_service.document_exists(doc.id):
-                logger.info("Document %s (%s) not found in Qdrant, marking as unprocessed", doc.id, doc.filename)
+            collection_name = doc.collection_name
+            if collection_name:
+                valid_collections.add(collection_name)
+
+            if doc.processed and not vector_store_service.document_exists(collection_name):
+                logger.info(
+                    "Document %s (%s) missing in Qdrant, marking as unprocessed",
+                    doc.id,
+                    doc.filename,
+                )
                 doc.processed = False
                 doc.num_chunks = 0
                 synced_count += 1
+
         if synced_count > 0:
             db.commit()
             logger.info("Synced %d documents with Qdrant status", synced_count)
+
+        vector_store_service.cleanup_orphaned_collections(valid_collections)
     except Exception as e:
         logger.exception("Failed to sync documents with Qdrant: %s", e)
         db.rollback()
     finally:
         db.close()
+
+
+def get_active_doc_collection_map(db: Session) -> Dict[int, str]:
+    """Return mapping of document IDs to collection names for enabled documents."""
+    active_documents = db.query(Document).filter(
+        Document.processed == True,
+        Document.query_enabled == True
+    ).all()
+    return vector_store_service.build_collection_map(active_documents)
 
 
 # Initialize FastAPI app
@@ -202,6 +225,8 @@ async def upload_document(
         
         # Process document with metadata chunk
         pickle_path = os.path.join(settings.data_dir, "pickles", f"doc_{db_document.id}.pkl")
+        collection_name = db_document.collection_name
+        vector_store_service.reset_collection(collection_name)
         chunks = doc_processor.process_document(
             db_document.id, 
             text, 
@@ -211,7 +236,12 @@ async def upload_document(
         )
         
         # Add to vector store with document name
-        vector_store_service.add_documents(db_document.id, chunks, document_name=file.filename)
+        vector_store_service.add_documents(
+            db_document.id,
+            chunks,
+            collection_name,
+            document_name=file.filename
+        )
         
         # Update document record
         db_document.pickle_path = pickle_path
@@ -272,6 +302,7 @@ async def reprocess_document(doc_id: int, db: Session = Depends(get_db)):
         
         # Process document with metadata
         pickle_path = os.path.join(settings.data_dir, "pickles", f"doc_{document.id}.pkl")
+        collection_name = document.collection_name
         chunks = doc_processor.process_document(
             document.id, 
             text, 
@@ -281,7 +312,13 @@ async def reprocess_document(doc_id: int, db: Session = Depends(get_db)):
         )
         
         # Add to vector store with document name
-        vector_store_service.add_documents(document.id, chunks, document_name=document.filename)
+        vector_store_service.reset_collection(collection_name)
+        vector_store_service.add_documents(
+            document.id,
+            chunks,
+            collection_name,
+            document_name=document.filename
+        )
         
         # Update document record
         document.pickle_path = pickle_path
@@ -298,6 +335,23 @@ async def reprocess_document(doc_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Error reprocessing document: {str(e)}")
 
 
+@app.patch("/documents/{doc_id}/preferences", response_model=DocumentUploadResponse)
+async def update_document_preferences(
+    doc_id: int,
+    preferences: DocumentPreferenceUpdate,
+    db: Session = Depends(get_db)
+):
+    """Enable or disable a document for querying."""
+    document = db.query(Document).filter(Document.id == doc_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    document.query_enabled = preferences.query_enabled
+    db.commit()
+    db.refresh(document)
+    return document
+
+
 @app.delete("/documents/{doc_id}")
 async def delete_document(doc_id: int, db: Session = Depends(get_db)):
     """Delete a document from database and Qdrant"""
@@ -306,8 +360,8 @@ async def delete_document(doc_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Document not found")
     
     try:
-        # Delete from Qdrant
-        vector_store_service.delete_document(doc_id)
+        # Delete per-document collection in Qdrant
+        vector_store_service.delete_document(document.collection_name)
         
         # Delete pickle file if exists
         if document.pickle_path and os.path.exists(document.pickle_path):
@@ -346,6 +400,10 @@ async def query_documents(request: QueryRequest, db: Session = Depends(get_db)):
         # Get chat history
         messages = db.query(Message).filter(Message.chat_id == request.chat_id).order_by(Message.created_at).all()
         chat_history = [{"role": msg.role, "content": msg.content} for msg in messages]
+
+        doc_collection_map = get_active_doc_collection_map(db)
+        if not doc_collection_map:
+            raise HTTPException(status_code=400, detail="No active documents selected for querying.")
         
         # Save user message
         user_message = Message(
@@ -357,7 +415,7 @@ async def query_documents(request: QueryRequest, db: Session = Depends(get_db)):
         db.commit()
         
         # Query RAG system
-        answer, sources = rag_service.query(request.query, db, chat_history)
+        answer, sources = rag_service.query(request.query, db, doc_collection_map, chat_history)
         
         # Save assistant message
         assistant_message = Message(
@@ -396,6 +454,10 @@ async def query_documents_stream(request: QueryRequest, db: Session = Depends(ge
         messages = db.query(Message).filter(Message.chat_id == request.chat_id).order_by(Message.created_at).all()
         chat_history = [{"role": msg.role, "content": msg.content} for msg in messages]
 
+        doc_collection_map = get_active_doc_collection_map(db)
+        if not doc_collection_map:
+            raise HTTPException(status_code=400, detail="No active documents selected for querying.")
+
         user_message = Message(
             chat_id=request.chat_id,
             content=request.query,
@@ -423,7 +485,10 @@ async def query_documents_stream(request: QueryRequest, db: Session = Depends(ge
                 thinking_queue.put(("thinking", step))
             
             contexts, sources, thinking_steps = rag_service.multi_query_retrieve_and_rerank(
-                request.query, db, on_thinking=on_thinking
+                request.query,
+                db,
+                doc_collection_map,
+                on_thinking=on_thinking
             )
             retrieval_result["contexts"] = contexts
             retrieval_result["sources"] = sources

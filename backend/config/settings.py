@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     qdrant_host: str = "localhost"
     qdrant_port: int = 6333
     qdrant_collection_name: str = "documents"
+    qdrant_collection_prefix: str = "doc_"
     
     llm_api_key: str = ""
     llm_api_base: str = "https://api.openai.com/v1"

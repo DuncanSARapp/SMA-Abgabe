@@ -117,58 +117,69 @@ class VectorStoreService:
     def __init__(self, embedding_service: EmbeddingService):
         self.client = QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
         self.embedding_service = embedding_service
-        self.collection_name = settings.qdrant_collection_name
-        self._ensure_collection()
+        self.default_collection = settings.qdrant_collection_name
+        self.collection_prefix = settings.qdrant_collection_prefix
     
-    def _ensure_collection(self):
-        """Create collection with hybrid vectors (dense + sparse) if needed"""
+    # ------------------------------------------------------------------
+    # Collection helpers
+    # ------------------------------------------------------------------
+    def collection_name_for_document(self, document_id: int) -> str:
+        return f"{self.collection_prefix}{document_id}"
+
+    def collection_exists(self, collection_name: str) -> bool:
+        if not collection_name:
+            return False
         try:
-            info = self.client.get_collection(self.collection_name)
+            self.client.get_collection(collection_name)
+            return True
+        except Exception:
+            return False
+
+    def ensure_collection(self, collection_name: str):
+        """Ensure a hybrid collection exists for a document."""
+        if not collection_name:
+            return
+        try:
+            info = self.client.get_collection(collection_name)
             vectors_config = getattr(info.config.params, "vectors", None)
 
-            # Check if we have the new hybrid setup with named vectors
             has_dense = False
-            has_sparse = False
-            
             if isinstance(vectors_config, dict):
                 has_dense = "dense" in vectors_config
             elif hasattr(vectors_config, "get"):
                 has_dense = vectors_config.get("dense") is not None
-            
+
             sparse_config = getattr(info.config.params, "sparse_vectors", None)
-            if sparse_config:
-                has_sparse = True
-            
-            # If we don't have hybrid setup, recreate
+            has_sparse = bool(sparse_config)
+
             if not has_dense or not has_sparse:
-                logger.info("Recreating collection %s for hybrid search support", self.collection_name)
-                self._create_hybrid_collection()
+                logger.info("Recreating collection %s for hybrid support", collection_name)
+                self._create_hybrid_collection(collection_name)
                 return
-                
-            # Check dense vector dimension
+
             current_size = None
             if isinstance(vectors_config, dict) and "dense" in vectors_config:
                 dense_config = vectors_config["dense"]
                 if hasattr(dense_config, "size"):
                     current_size = dense_config.size
-            
+
             if current_size and current_size != self.embedding_service.dimension:
                 logger.info(
-                    "Recreating collection %s to adjust dimensionality %s -> %s",
-                    self.collection_name,
+                    "Recreating collection %s due to dimension change %s -> %s",
+                    collection_name,
                     current_size,
                     self.embedding_service.dimension,
                 )
-                self._create_hybrid_collection()
-                
-        except Exception as e:
-            logger.info("Creating new hybrid collection %s: %s", self.collection_name, e)
-            self._create_hybrid_collection()
-    
-    def _create_hybrid_collection(self):
-        """Create a collection with both dense and sparse vectors"""
+                self._create_hybrid_collection(collection_name)
+
+        except Exception as exc:
+            logger.info("Creating collection %s (%s)", collection_name, exc)
+            self._create_hybrid_collection(collection_name)
+
+    def _create_hybrid_collection(self, collection_name: str):
+        """Create or recreate a hybrid collection with dense + sparse vectors."""
         self.client.recreate_collection(
-            collection_name=self.collection_name,
+            collection_name=collection_name,
             vectors_config={
                 "dense": VectorParams(
                     size=self.embedding_service.dimension,
@@ -181,9 +192,58 @@ class VectorStoreService:
                 )
             }
         )
+
+    def reset_collection(self, collection_name: str):
+        if not collection_name:
+            return
+        try:
+            self.client.delete_collection(collection_name)
+        except Exception:
+            pass
+        self._create_hybrid_collection(collection_name)
+
+    def delete_collection(self, collection_name: str):
+        if not collection_name or not self.collection_exists(collection_name):
+            return
+        self.client.delete_collection(collection_name)
+
+    def cleanup_orphaned_collections(self, valid_collections: set[str]) -> None:
+        try:
+            collection_list = self.client.get_collections().collections
+        except Exception as exc:
+            logger.warning("Unable to list Qdrant collections: %s", exc)
+            return
+
+        for collection in collection_list:
+            name = getattr(collection, "name", "")
+            if not name or not name.startswith(self.collection_prefix):
+                continue
+            if name not in valid_collections:
+                logger.info("Deleting orphaned Qdrant collection %s", name)
+                try:
+                    self.client.delete_collection(name)
+                except Exception as exc:
+                    logger.warning("Failed to delete collection %s: %s", name, exc)
+
+    def build_collection_map(self, documents: List[Any]) -> Dict[int, str]:
+        mapping: Dict[int, str] = {}
+        for document in documents:
+            doc_id = getattr(document, "id", None)
+            if doc_id is None:
+                continue
+            collection_name = getattr(document, "collection_name", None) or self.collection_name_for_document(doc_id)
+            mapping[doc_id] = collection_name
+        return mapping
     
-    def add_documents(self, doc_id: int, chunks: List[Dict[str, Any]], document_name: str = None) -> None:
-        """Add document chunks to vector store with both dense and sparse embeddings"""
+    def add_documents(
+        self,
+        doc_id: int,
+        chunks: List[Dict[str, Any]],
+        collection_name: str,
+        document_name: str | None = None
+    ) -> None:
+        """Add document chunks to the specified collection (dense + sparse)."""
+        self.ensure_collection(collection_name)
         points = []
         for idx, chunk in enumerate(chunks):
             dense_embedding = self.embedding_service.embed_text(chunk['text'])
@@ -215,104 +275,93 @@ class VectorStoreService:
         
         try:
             self.client.upsert(
-                collection_name=self.collection_name,
+                collection_name=collection_name,
                 points=points
             )
         except Exception as exc:
             if "vector" in str(exc).lower() or "size" in str(exc).lower():
-                logger.warning("Qdrant collection issue detected; recreating collection and retrying")
-                self._create_hybrid_collection()
-                self.client.upsert(
-                    collection_name=self.collection_name,
-                    points=points
-                )
+                logger.warning("Collection %s had schema issues; recreating", collection_name)
+                self._create_hybrid_collection(collection_name)
+                self.client.upsert(collection_name=collection_name, points=points)
             else:
                 raise
     
-    def document_exists(self, doc_id: int) -> bool:
-        """Check if a document has any chunks in the vector store"""
+    def document_exists(self, collection_name: str) -> bool:
+        if not self.collection_exists(collection_name):
+            return False
         try:
             results, _ = self.client.scroll(
-                collection_name=self.collection_name,
-                scroll_filter={
-                    "must": [
-                        {"key": "doc_id", "match": {"value": doc_id}}
-                    ]
-                },
+                collection_name=collection_name,
                 limit=1
             )
             return len(results) > 0
-        except Exception as e:
-            logger.warning("Failed to check document existence in Qdrant: %s", e)
+        except Exception as exc:
+            logger.warning("Failed to check collection %s: %s", collection_name, exc)
             return False
 
-    def delete_document(self, doc_id: int) -> None:
-        """Delete all chunks for a document from the vector store"""
-        try:
-            self.client.delete(
-                collection_name=self.collection_name,
-                points_selector={
-                    "filter": {
-                        "must": [
-                            {"key": "doc_id", "match": {"value": doc_id}}
-                        ]
-                    }
-                }
-            )
-        except Exception as e:
-            logger.warning("Failed to delete document %s from Qdrant: %s", doc_id, e)
+    def delete_document(self, collection_name: str) -> None:
+        self.delete_collection(collection_name)
 
-    def search(self, query: str, top_k: int = 20) -> List[Dict[str, Any]]:
-        """Hybrid search combining dense and sparse (BM25) vectors using RRF fusion"""
+    def search(self, query: str, doc_collection_map: Dict[int, str], top_k: int = 20) -> List[Dict[str, Any]]:
+        """Hybrid search across the selected per-document collections."""
+        if not doc_collection_map:
+            return []
+
         dense_embedding = self.embedding_service.embed_text(query)
         sparse_embedding = self.embedding_service.embed_sparse(query)
-        
-        # Use Qdrant's query API with prefetch for hybrid search
-        results = self.client.query_points(
-            collection_name=self.collection_name,
-            prefetch=[
-                Prefetch(
-                    query=dense_embedding,
-                    using="dense",
-                    limit=top_k * 2
-                ),
-                Prefetch(
-                    query=SparseVector(
-                        indices=sparse_embedding["indices"],
-                        values=sparse_embedding["values"]
-                    ),
-                    using="sparse",
-                    limit=top_k * 2
+        combined_results: List[Dict[str, Any]] = []
+
+        per_collection_limit = max(top_k, 5)
+
+        for doc_id, collection_name in doc_collection_map.items():
+            if not self.collection_exists(collection_name):
+                continue
+            try:
+                results = self.client.query_points(
+                    collection_name=collection_name,
+                    prefetch=[
+                        Prefetch(query=dense_embedding, using="dense", limit=per_collection_limit * 2),
+                        Prefetch(
+                            query=SparseVector(
+                                indices=sparse_embedding["indices"],
+                                values=sparse_embedding["values"]
+                            ),
+                            using="sparse",
+                            limit=per_collection_limit * 2
+                        )
+                    ],
+                    query=FusionQuery(fusion=Fusion.RRF),
+                    limit=per_collection_limit
                 )
-            ],
-            query=FusionQuery(fusion=Fusion.RRF),
-            limit=top_k
-        )
-        
-        return [
-            {
-                'text': hit.payload['text'],
-                'doc_id': hit.payload['doc_id'],
-                'chunk_id': hit.payload['chunk_id'],
-                'parent_id': hit.payload.get('parent_id'),
-                'document_name': hit.payload.get('document_name', ''),
-                'section': hit.payload.get('section', ''),
-                'position': hit.payload.get('position', ''),
-                'score': hit.score
-            }
-            for hit in results.points
-        ]
+            except Exception as exc:
+                logger.warning("Query failed for collection %s: %s", collection_name, exc)
+                continue
+
+            for hit in results.points:
+                combined_results.append({
+                    'text': hit.payload['text'],
+                    'doc_id': hit.payload.get('doc_id', doc_id),
+                    'chunk_id': hit.payload['chunk_id'],
+                    'parent_id': hit.payload.get('parent_id'),
+                    'document_name': hit.payload.get('document_name', ''),
+                    'section': hit.payload.get('section', ''),
+                    'position': hit.payload.get('position', ''),
+                    'score': hit.score
+                })
+
+        combined_results.sort(key=lambda item: item['score'], reverse=True)
+        return combined_results[:top_k]
     
-    def search_dense_only(self, query: str, top_k: int = 20) -> List[Dict[str, Any]]:
-        """Search using only dense vectors (semantic similarity)"""
+    def search_dense_only(self, query: str, collection_name: str, top_k: int = 20) -> List[Dict[str, Any]]:
+        """Search using only dense vectors (semantic similarity) within a collection."""
+        if not self.collection_exists(collection_name):
+            return []
         query_embedding = self.embedding_service.embed_text(query)
-        
         results = self.client.search(
-            collection_name=self.collection_name,
+            collection_name=collection_name,
             query_vector=("dense", query_embedding),
             limit=top_k
         )
-        
         return [
             {
                 'text': hit.payload['text'],
@@ -327,59 +376,60 @@ class VectorStoreService:
             for hit in results
         ]
     
-    def get_metadata_chunks_for_docs(self, doc_ids: List[int]) -> List[Dict[str, Any]]:
-        """
-        Retrieve metadata chunks for specific documents.
-        Metadata chunks have section='Document Metadata' or position='metadata'.
-        """
-        if not doc_ids:
+    def get_metadata_chunks_for_docs(self, doc_collection_map: Dict[int, str]) -> List[Dict[str, Any]]:
+        """Retrieve metadata chunks for the selected documents."""
+        if not doc_collection_map:
             return []
-        
-        try:
-            # Query for metadata chunks of the specified documents
-            results, _ = self.client.scroll(
-                collection_name=self.collection_name,
-                scroll_filter={
-                    "must": [
-                        {"key": "doc_id", "match": {"any": doc_ids}},
-                        {"key": "section", "match": {"value": "Document Metadata"}}
-                    ]
-                },
-                limit=len(doc_ids) * 2,  # Allow for some buffer
-                with_payload=True
-            )
-            
-            return [
-                {
+
+        metadata_chunks: List[Dict[str, Any]] = []
+        for doc_id, collection_name in doc_collection_map.items():
+            if not self.collection_exists(collection_name):
+                continue
+            try:
+                results, _ = self.client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter={
+                        "must": [
+                            {"key": "section", "match": {"value": "Document Metadata"}}
+                        ]
+                    },
+                    limit=2,
+                    with_payload=True
+                )
+            except Exception as exc:
+                logger.warning("Failed to retrieve metadata for doc %s: %s", doc_id, exc)
+                continue
+
+            for point in results:
+                metadata_chunks.append({
                     'text': point.payload['text'],
-                    'doc_id': point.payload['doc_id'],
+                    'doc_id': doc_id,
                     'chunk_id': point.payload.get('chunk_id', 0),
                     'parent_id': point.payload.get('parent_id', 0),
                     'document_name': point.payload.get('document_name', ''),
                     'section': point.payload.get('section', ''),
                     'position': point.payload.get('position', ''),
-                    'score': 0.0,  # No search score for direct retrieval
-                    'is_metadata_injection': True  # Mark as injected
-                }
-                for point in results
-            ]
-        except Exception as e:
-            logger.warning("Failed to retrieve metadata chunks: %s", e)
-            return []
+                    'score': 0.0,
+                    'is_metadata_injection': True
+                })
+        return metadata_chunks
     
-    def search_sparse_only(self, query: str, top_k: int = 20) -> List[Dict[str, Any]]:
-        """Search using only sparse vectors (keyword/BM25 similarity)"""
+    def search_sparse_only(self, query: str, collection_name: str, top_k: int = 20) -> List[Dict[str, Any]]:
+        """Search using only sparse vectors within a collection."""
+        if not self.collection_exists(collection_name):
+            return []
         sparse_embedding = self.embedding_service.embed_sparse(query)
-        
         results = self.client.search(
-            collection_name=self.collection_name,
-            query_vector=("sparse", SparseVector(
-                indices=sparse_embedding["indices"],
-                values=sparse_embedding["values"]
-            )),
+            collection_name=collection_name,
+            query_vector=(
+                "sparse",
+                SparseVector(
+                    indices=sparse_embedding["indices"],
+                    values=sparse_embedding["values"]
+                )
+            ),
             limit=top_k
         )
-        
         return [
             {
                 'text': hit.payload['text'],

@@ -39,9 +39,15 @@ class DocumentUploadResponse(BaseModel):
     uploaded_at: datetime
     processed: bool
     num_chunks: int
+    query_enabled: bool
+    collection_name: str
     
     class Config:
         from_attributes = True
+
+
+class DocumentPreferenceUpdate(BaseModel):
+    query_enabled: bool
 
 
 class QueryRequest(BaseModel):

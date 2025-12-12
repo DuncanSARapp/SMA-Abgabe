@@ -61,15 +61,20 @@ class RAGService:
             result.append(original_query)
         return result
 
-    def retrieve_for_query(self, query: str) -> List[Dict[str, Any]]:
-        """Retrieve chunks for a single query."""
-        return self.vector_store.search(query, top_k=settings.top_k_retrieval)
+    def retrieve_for_query(self, query: str, doc_collection_map: Dict[int, str]) -> List[Dict[str, Any]]:
+        """Retrieve chunks for a single query constrained to selected collections."""
+        return self.vector_store.search(
+            query,
+            doc_collection_map,
+            top_k=settings.top_k_retrieval
+        )
 
     def _inject_metadata_chunks(
         self,
         chunks: List[Dict[str, Any]],
         seen_chunk_keys: set,
-        emit_thinking: Callable = None
+        emit_thinking: Callable = None,
+        doc_collection_map: Dict[int, str] | None = None
     ) -> List[Dict[str, Any]]:
         """
         Inject metadata chunks for all documents found in the search results.
@@ -89,7 +94,15 @@ class RAGService:
         }
         
         # Fetch metadata chunks for these documents
-        metadata_chunks = self.vector_store.get_metadata_chunks_for_docs(doc_ids)
+        if not doc_collection_map:
+            return chunks
+
+        subset = {
+            doc_id: doc_collection_map[doc_id]
+            for doc_id in doc_ids
+            if doc_id in doc_collection_map
+        }
+        metadata_chunks = self.vector_store.get_metadata_chunks_for_docs(subset)
         
         if not metadata_chunks:
             return chunks
@@ -118,7 +131,8 @@ class RAGService:
         queries: List[str],
         seen_chunk_keys: set,
         emit_thinking: Callable,
-        round_name: str = ""
+        round_name: str = "",
+        doc_collection_map: Dict[int, str] | None = None
     ) -> tuple[List[Dict[str, Any]], set]:
         """Execute search for multiple queries and collect unique chunks."""
         all_chunks: List[Dict[str, Any]] = []
@@ -128,7 +142,9 @@ class RAGService:
             display_query = f"\"{query[:80]}...\"" if len(query) > 80 else f"\"{query}\""
             emit_thinking("searching", f"{prefix}Query {i+1}: {display_query}")
             
-            chunks = self.retrieve_for_query(query)
+            if not doc_collection_map:
+                break
+            chunks = self.retrieve_for_query(query, doc_collection_map)
             new_chunks = 0
             for chunk in chunks:
                 chunk_key = f"{chunk.get('doc_id')}_{chunk.get('chunk_id')}"
@@ -144,6 +160,7 @@ class RAGService:
         self, 
         original_query: str, 
         db: Session,
+        doc_collection_map: Dict[int, str],
         on_thinking: Callable[[str], None] | None = None
     ) -> tuple[List[str], List[Dict[str, str]], List[Dict[str, Any]]]:
         """
@@ -178,14 +195,18 @@ class RAGService:
         query_variations = self.generate_query_variations(original_query)
         emit_thinking("queries_generated", "Generated queries", query_variations)
         
+        if not doc_collection_map:
+            emit_thinking("no_documents", "No active document collections selected")
+            return [], [], thinking_steps
+
         round1_chunks, seen_chunk_keys = self._search_with_queries(
-            query_variations, seen_chunk_keys, emit_thinking, "Round 1"
+            query_variations, seen_chunk_keys, emit_thinking, "Round 1", doc_collection_map
         )
         all_accumulated_chunks.extend(round1_chunks)
         
         # Inject metadata chunks for found documents (author, title, etc.)
         all_accumulated_chunks = self._inject_metadata_chunks(
-            all_accumulated_chunks, seen_chunk_keys, emit_thinking
+            all_accumulated_chunks, seen_chunk_keys, emit_thinking, doc_collection_map
         )
         
         emit_thinking("round1_dedup", f"Round 1 total: {len(all_accumulated_chunks)} chunks (incl. metadata)")
@@ -231,13 +252,13 @@ class RAGService:
             emit_thinking("round2_queries", "Generated alternative queries", round2_queries)
             
             round2_chunks, seen_chunk_keys = self._search_with_queries(
-                round2_queries, seen_chunk_keys, emit_thinking, "Round 2"
+                round2_queries, seen_chunk_keys, emit_thinking, "Round 2", doc_collection_map
             )
             all_accumulated_chunks.extend(round2_chunks)
             
             # Inject metadata chunks for any new documents found
             all_accumulated_chunks = self._inject_metadata_chunks(
-                all_accumulated_chunks, seen_chunk_keys, emit_thinking
+                all_accumulated_chunks, seen_chunk_keys, emit_thinking, doc_collection_map
             )
             
             emit_thinking("round2_dedup", f"Round 2 total: {len(all_accumulated_chunks)} chunks (incl. metadata)")
@@ -277,13 +298,13 @@ class RAGService:
                     emit_thinking("round3_queries", "Generated refined queries", round3_queries)
                     
                     round3_chunks, seen_chunk_keys = self._search_with_queries(
-                        round3_queries, seen_chunk_keys, emit_thinking, "Round 3"
+                        round3_queries, seen_chunk_keys, emit_thinking, "Round 3", doc_collection_map
                     )
                     all_accumulated_chunks.extend(round3_chunks)
                     
                     # Inject metadata chunks for any new documents found
                     all_accumulated_chunks = self._inject_metadata_chunks(
-                        all_accumulated_chunks, seen_chunk_keys, emit_thinking
+                        all_accumulated_chunks, seen_chunk_keys, emit_thinking, doc_collection_map
                     )
                     
                     emit_thinking("round3_dedup", f"Round 3 total: {len(all_accumulated_chunks)} chunks (incl. metadata)")
@@ -370,7 +391,12 @@ class RAGService:
         
         return parent_contexts, sources
     
-    def retrieve_and_rerank(self, query: str, db: Session) -> tuple[List[str], List[Dict[str, str]]]:
+    def retrieve_and_rerank(
+        self,
+        query: str,
+        db: Session,
+        doc_collection_map: Dict[int, str]
+    ) -> tuple[List[str], List[Dict[str, str]]]:
         """
         Retrieve relevant chunks, rerank them, and return parent documents
         
@@ -378,7 +404,11 @@ class RAGService:
             Tuple of (parent_contexts, source_descriptions)
         """
         # Step 1: Retrieve child chunks from vector store (hybrid search)
-        retrieved_chunks = self.vector_store.search(query, top_k=settings.top_k_retrieval)
+        retrieved_chunks = self.vector_store.search(
+            query,
+            doc_collection_map,
+            top_k=settings.top_k_retrieval
+        )
         
         if not retrieved_chunks:
             return [], []
@@ -448,7 +478,13 @@ class RAGService:
             if text:
                 yield text
     
-    def query(self, query: str, db: Session, chat_history: List[Dict[str, str]] = None) -> tuple[str, List[str]]:
+    def query(
+        self,
+        query: str,
+        db: Session,
+        doc_collection_map: Dict[int, str],
+        chat_history: List[Dict[str, str]] = None
+    ) -> tuple[str, List[str]]:
         """
         Main RAG query method
         
@@ -456,7 +492,7 @@ class RAGService:
             Tuple of (answer, sources)
         """
         # Retrieve and rerank
-        contexts, sources = self.retrieve_and_rerank(query, db)
+        contexts, sources = self.retrieve_and_rerank(query, db, doc_collection_map)
         
         if not contexts:
             return "I couldn't find relevant information in the documents to answer your question.", []

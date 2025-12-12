@@ -3,6 +3,8 @@ from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Bool
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 
+from config.settings import settings
+
 Base = declarative_base()
 
 
@@ -39,3 +41,11 @@ class Document(Base):
     uploaded_at = Column(DateTime, default=datetime.utcnow)
     processed = Column(Boolean, default=False)
     num_chunks = Column(Integer, default=0)
+    query_enabled = Column(Boolean, default=True)
+
+    @property
+    def collection_name(self) -> str:
+        prefix = getattr(settings, "qdrant_collection_prefix", "doc_")
+        if self.id is None:
+            return f"{prefix}pending"
+        return f"{prefix}{self.id}"
