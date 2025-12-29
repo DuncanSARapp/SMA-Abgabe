@@ -43,7 +43,7 @@ services:
       QDRANT_HOST: qdrant
       QDRANT_PORT: 6333
       OPENAI_API_KEY: ${OPENAI_API_KEY}
-      LLM_MODEL: ${LLM_MODEL:-gpt-3.5-turbo}
+      LLM_MODEL: ${LLM_MODEL}
       HSA_OVERRIDE_GFX_VERSION: "10.3.0"
     volumes:
       - ./backend:/app

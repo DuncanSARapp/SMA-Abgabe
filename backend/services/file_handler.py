@@ -43,7 +43,7 @@ class DoclingConverter:
             return
 
         try:
-            from docling import DocumentConverter  # type: ignore[import-untyped]
+            from docling.document_converter import DocumentConverter
             self._converter = DocumentConverter()
             logger.info("Docling converter initialized")
         except Exception as exc:

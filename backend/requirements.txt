@@ -12,7 +12,8 @@ numpy<2,>=1.22.4
 langchain==0.3.13
 langchain-core==0.3.33
 langchain-community==0.3.13
-langchain-anthropic==0.3.6
+langchain-anthropic==0.3.
+langchain-ollama
 langchain-openai==0.3.0
 
 pypdf==4.0.1

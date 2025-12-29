@@ -6,8 +6,8 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance, VectorParams, PointStruct,
     SparseVectorParams, SparseIndexParams,
-    SparseVector, Prefetch, Fusion,
-    ScalarQuantization, ScalarQuantizationConfig, ScalarType, SearchParams, QuantizationSearchParams,
+    SparseVector, Prefetch,
+    ScalarQuantization, ScalarQuantizationConfig, ScalarType,
     PayloadSchemaType, Filter, FieldCondition, MatchValue
 )
 
@@ -46,8 +46,19 @@ class VectorStoreService:
         try:
             self.client.get_collection(collection_name)
             return True
-        except CollectionNotFoundError:
+        except Exception:
             return False
+
+    def delete_collection(self, collection_name: str) -> None:
+        if not collection_name:
+            return
+        try:
+            if self.collection_exists(collection_name):
+                self.client.delete_collection(collection_name)
+                logger.info(f"Deleted collection: {collection_name}")
+        except Exception as exc:
+            # Ignoriere Fehler wenn Collection bereits gelöscht
+            logger.warning(f"Could not delete collection {collection_name}: {exc}")
 
     def ensure_collection(self, collection_name: str) -> None:
         if not collection_name:
@@ -152,10 +163,6 @@ class VectorStoreService:
             pass
         self._create_hybrid_collection(collection_name)
 
-    def delete_collection(self, collection_name: str) -> None:
-        if not collection_name or not self.collection_exists(collection_name):
-            return
-        self.client.delete_collection(collection_name)
 
     def cleanup_orphaned_collections(self, valid_collections: Set[str]) -> None:
         try:
@@ -281,20 +288,12 @@ class VectorStoreService:
             logger.warning(f"Failed to check collection {collection_name}: {exc}")
             return False
 
-    def delete_document(self, collection_name: str) -> None:
+    def delete_document(self, collection_name) -> None:
         self.delete_collection(collection_name)
 
-    def search(
-            self,
-            query: str,
-            doc_collection_map: Dict[int, str],
-            top_k: int = 20
-    ) -> List[Dict[str, Any]]:
+    def search(self, query: str, doc_collection_map: Dict[int, str], top_k: int = 20) -> List[Dict[str, Any]]:
         if not doc_collection_map:
-            logger.warning("search() called with empty doc_collection_map")
             return []
-
-        logger.debug(f"Searching in {len(doc_collection_map)} collections: {list(doc_collection_map.values())}")
 
         dense_embedding = self.embedding_service.embed_text(query)
         sparse_embedding = self.embedding_service.embed_sparse(query)
@@ -303,29 +302,16 @@ class VectorStoreService:
         per_collection_limit = max(top_k, 5)
 
         for doc_id, collection_name in doc_collection_map.items():
-            logger.debug(f"Checking collection {collection_name} for doc_id {doc_id}")
-
-            if not collection_name:
-                logger.error(f"Empty collection_name for doc_id {doc_id}")
-                continue
-
             if not self.collection_exists(collection_name):
-                logger.error(
-                    f"Collection {collection_name} for doc_id {doc_id} does not exist in Qdrant. "
-                    f"This document may not have been properly processed or the collection was deleted."
-                )
                 continue
-
             try:
-                logger.debug(f"Querying collection {collection_name} with limit {per_collection_limit}")
+                # RRF Fusion mit beiden Vektoren
+                from qdrant_client.models import Fusion
+
                 results = self.client.query_points(
                     collection_name=collection_name,
                     prefetch=[
-                        Prefetch(
-                            query=dense_embedding,
-                            using="dense",
-                            limit=per_collection_limit * 2
-                        ),
+                        Prefetch(query=dense_embedding, using="dense", limit=per_collection_limit * 2),
                         Prefetch(
                             query=SparseVector(
                                 indices=sparse_embedding["indices"],
@@ -335,22 +321,12 @@ class VectorStoreService:
                             limit=per_collection_limit * 2
                         )
                     ],
-                    query=Fusion.RRF,
-                    limit=per_collection_limit,
-                    search_params=SearchParams(
-                        quantization=QuantizationSearchParams(
-                            ignore=False,
-                            rescore=True,
-                            oversampling=2.0
-                        )
-                    )
+                    query=dense_embedding,
+                    using="dense",
+                    limit=per_collection_limit
                 )
-                logger.debug(f"Query succeeded for collection {collection_name}, found {len(results.points)} results")
             except Exception as exc:
-                logger.error(
-                    f"Query failed for collection {collection_name} (doc_id {doc_id}): {type(exc).__name__}: {exc}",
-                    exc_info=True
-                )
+                logger.warning("Query failed for collection %s: %s", collection_name, exc)
                 continue
 
             for hit in results.points:
@@ -367,7 +343,6 @@ class VectorStoreService:
                     'score': hit.score
                 })
 
-        logger.info(f"Search completed: found {len(combined_results)} total results from {len(doc_collection_map)} collections")
         combined_results.sort(key=lambda item: item['score'], reverse=True)
         return combined_results[:top_k]
 

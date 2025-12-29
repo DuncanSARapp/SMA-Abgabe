@@ -346,27 +346,47 @@ async def update_document_preferences(
 
 @app.delete("/documents/{doc_id}", tags=["Documents"])
 async def delete_document(doc_id: int, db: Session = Depends(get_db)):
-    document = db.query(Document).filter(Document.id == doc_id).first()  # type: ignore[arg-type]
+    document = db.query(Document).filter(Document.id == doc_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    try:
-        vector_store_service.delete_document(document.collection_name)  # type: ignore[arg-type]
-        FileHandler.delete_file(document.pickle_path)  # type: ignore[arg-type]
-        FileHandler.delete_file(document.file_path)  # type: ignore[arg-type]
+    collection_name = document.collection_name
+    pickle_path = document.pickle_path
+    file_path = document.file_path
 
+    # Lösche aus Datenbank zuerst (wichtigster Schritt)
+    try:
         db.delete(document)
         db.commit()
-
-        return {"status": "deleted"}
-
+        logger.info(f"Deleted document {doc_id} from database")
     except Exception as exc:
         db.rollback()
-        logger.exception(f"Failed to delete document {doc_id}: {exc}")
+        logger.exception(f"Failed to delete document {doc_id} from database: {exc}")
         raise HTTPException(
             status_code=500,
-            detail=f"Error deleting document: {str(exc)}"
+            detail=f"Error deleting document from database: {str(exc)}"
         )
+
+    # Cleanup - Fehler hier sind nicht kritisch
+    try:
+        vector_store_service.delete_document(collection_name)
+        logger.info(f"Deleted collection {collection_name}")
+    except Exception as exc:
+        logger.warning(f"Failed to delete collection {collection_name}: {exc}")
+
+    try:
+        FileHandler.delete_file(pickle_path)
+        logger.info(f"Deleted pickle file {pickle_path}")
+    except Exception as exc:
+        logger.warning(f"Failed to delete pickle {pickle_path}: {exc}")
+
+    try:
+        FileHandler.delete_file(file_path)
+        logger.info(f"Deleted file {file_path}")
+    except Exception as exc:
+        logger.warning(f"Failed to delete file {file_path}: {exc}")
+
+    return {"status": "deleted"}
 
 @app.post("/query/stream", tags=["Query"])
 async def query_documents_stream(request: QueryRequest, db: Session = Depends(get_db)):

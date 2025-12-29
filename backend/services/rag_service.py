@@ -14,7 +14,7 @@ from .document_processor import DocumentProcessor, load_parent_document
 from .llm_factory import create_llm
 from .reranker import RerankerService
 from .vector_store import VectorStoreService
-from ..db.models import Document
+from db.models import Document
 
 logger = logging.getLogger(__name__)
 
@@ -275,7 +275,6 @@ class RAGService:
             return [original_query]
 
     def generate_query_variations(self, original_query: str) -> List[str]:
-        # Check cache first
         if original_query in self.query_expansion_cache:
             logger.debug(f"Query expansion cache hit for: {original_query[:50]}...")
             return self.query_expansion_cache[original_query]
