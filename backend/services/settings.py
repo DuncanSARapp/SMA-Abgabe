@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     embedding_cache_size: int = 10000
     use_docling_parser: bool = True
+    ocr_engine: str = "rapidocr" # Options: "rapidocr", "paddleocr", "easyocr", "tesseract"
+    use_gpu_for_ocr: bool = False
 
     chunk_size: int = 1000
     chunk_overlap: int = 180

@@ -1,8 +1,11 @@
 import logging
 import os
 import shutil
-from typing import BinaryIO, Dict, Any, Optional, Callable
+from typing import BinaryIO, Dict, Any, Optional
 
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.document_converter import DocumentConverter, PdfFormatOption
 from pypdf import PdfReader
 from docx import Document as DocxDocument
 
@@ -24,66 +27,60 @@ class TextExtractionError(FileProcessingError):
 
 
 class DoclingConverter:
-    _instance: Optional["DoclingConverter"] = None
-    _converter = None
-    _disabled = False
+  _instance: Optional["DoclingConverter"] = None
+  _converter = None
+  _disabled = False
 
-    @classmethod
-    def get_instance(cls) -> Optional["DoclingConverter"]:
-        if cls._disabled or not settings.use_docling_parser:
-            return None
+  @classmethod
+  def get_instance(cls) -> Optional["DoclingConverter"]:
+      if cls._disabled or not settings.use_docling_parser:
+          return None
+      if cls._instance is None:
+          cls._instance = cls()
+      return cls._instance
 
-        if cls._instance is None:
-            cls._instance = cls()
+  def __init__(self):
+      if DoclingConverter._disabled:
+          return
+      try:
+          pipeline_options = PdfPipelineOptions()
+          pipeline_options.do_ocr = False  # IMPORTANT: Disable OCR if not needed
+          pipeline_options.do_table_structure = True
+          pipeline_options.do_code_enrichment = True
+          pipeline_options.generate_page_images = False
+          pipeline_options.generate_picture_images = False
 
-        return cls._instance
+          self._converter = DocumentConverter(
+              format_options={
+                  InputFormat.PDF: PdfFormatOption(
+                      pipeline_options=pipeline_options
+                  )
+              }
+          )
+          logger.info("Docling converter initialized (OCR disabled)")
+      except Exception as exc:
+          logger.warning(f"Docling unavailable: {exc}")
+          DoclingConverter._disabled = True
+          self._converter = None
 
-    def __init__(self):
-        if DoclingConverter._disabled:
-            return
+  def convert(self, file_path: str) -> Optional[str]:
+      if self._converter is None:
+          return None
+      try:
+          result = self._converter.convert(file_path)
+          document = result.document
+          if document is None:
+              return None
 
-        try:
-            from docling.document_converter import DocumentConverter
-            self._converter = DocumentConverter()
-            logger.info("Docling converter initialized")
-        except Exception as exc:
-            logger.warning(f"Docling unavailable, using fallback parser: {exc}")
-            DoclingConverter._disabled = True
-            self._converter = None
+          markdown = document.export_to_markdown()
+          if markdown:
+              logger.info(f"✅ Docling converted {file_path}: {len(markdown)} chars")
+              return markdown
 
-    def convert(self, file_path: str) -> None | Callable | str:
-        if self._converter is None:
-            return None
-
-        try:
-            try:
-                result = self._converter.convert(file_path)
-            except TypeError:
-                result = self._converter.convert(input_document=file_path)
-
-            document = getattr(result, "document", None)
-            if document is None:
-                return None
-
-            export_methods = [
-                "export_markdown",
-                "export_to_markdown",
-                "export_plaintext",
-                "export_to_text",
-            ]
-
-            for method_name in export_methods:
-                exporter = getattr(document, method_name, None)
-                if callable(exporter):
-                    text = exporter()
-                    if text:
-                        return text
-
-            return str(document)
-
-        except Exception as exc:
-            logger.warning(f"Docling conversion failed for {file_path}: {exc}")
-            return None
+          return None
+      except Exception as exc:
+          logger.warning(f"Docling conversion failed: {exc}")
+          return None
 
 
 class PDFExtractor:

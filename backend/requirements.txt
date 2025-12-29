@@ -21,10 +21,15 @@ langchain-openai==0.3.11
 langchain-ollama==0.3.5
 
 # Document Processing
-docling>=2.17,<3.0
+docling[rapidocr]>=2.17,<3.0
+onnxruntime>=1.7.0,<2.0.0
+onnxruntime-gpu>=1.17.0
+transformers>=4.47.1,<5.0.0
 pypdf==5.1.0
 python-docx==1.1.2
 tiktoken==0.8.0
+rapidocr>=1.4.1
+paddleocr>=2.7.0.0
 
 # Embeddings & ML
 sentence-transformers==3.3.1

@@ -46,7 +46,7 @@ class VectorStoreService:
         try:
             self.client.get_collection(collection_name)
             return True
-        except Exception:
+        except CollectionNotFoundError:
             return False
 
     def delete_collection(self, collection_name: str) -> None:
@@ -57,7 +57,6 @@ class VectorStoreService:
                 self.client.delete_collection(collection_name)
                 logger.info(f"Deleted collection: {collection_name}")
         except Exception as exc:
-            # Ignoriere Fehler wenn Collection bereits gelöscht
             logger.warning(f"Could not delete collection {collection_name}: {exc}")
 
     def ensure_collection(self, collection_name: str) -> None:

@@ -6,12 +6,17 @@ RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     curl \
+    libgomp1 \
+    libopenblas-dev \
+    libomp-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt \
-    --extra-index-url https://download.pytorch.org/whl/cpu
+    --extra-index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir onnxruntime rapidocr
+
 
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('mixedbread-ai/deepset-mxbai-embed-de-large-v1')"
 RUN python -c "from sentence_transformers import CrossEncoder; CrossEncoder('BAAI/bge-reranker-v2-m3')"
