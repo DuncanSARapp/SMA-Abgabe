@@ -1,29 +1,40 @@
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-sqlalchemy==2.0.25
-psycopg2-binary==2.9.9
-alembic==1.13.1
-pydantic==2.8.2
-pydantic-settings==2.3.4
-python-multipart==0.0.6
+# FastAPI & Web Server
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
 
-# LangChain and related
-langchain==0.1.5
-langchain-community==0.0.17
-langchain-openai==0.0.3
+# Database
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.11
+alembic==1.13.3
+
+# Vector Store
 qdrant-client==1.12.1
+numpy==1.26.4
 
-# Document processing
-pypdf==4.0.1
+# LangChain Framework
+langchain==0.3.18
+langchain-core==0.3.76
+langchain-community==0.3.17
+langchain-anthropic==0.3.11
+langchain-openai==0.3.11
+langchain-ollama==0.3.5
+
+# Document Processing - VLM Pipeline
+docling[rapidocr]>=2.17,<3.0
+pypdf==5.1.0
 python-docx==1.1.2
-tiktoken==0.5.2
-docling==2.0.0
+tiktoken==0.8.0
 
-# Embeddings and reranking
-sentence-transformers==2.3.1
-torch==2.4.1
-torchvision==0.19.1
+# Embeddings & ML
+sentence-transformers==3.3.1
+transformers>=4.51.3
+torch==2.5.1
+torchvision==0.20.1
 
-# Utilities
-python-dotenv==1.0.0
-httpx==0.26.0
+# Settings & Utils
+pydantic==2.10.3
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+httpx==0.28.1
+cachetools==5.5.0

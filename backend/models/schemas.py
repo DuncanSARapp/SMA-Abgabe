@@ -1,6 +1,7 @@
-from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional, List
+from typing import List
+
+from pydantic import BaseModel, ConfigDict
 
 
 class ChatCreate(BaseModel):
@@ -8,13 +9,12 @@ class ChatCreate(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     title: str
     created_at: datetime
     updated_at: datetime
-    
-    class Config:
-        from_attributes = True
 
 
 class MessageCreate(BaseModel):
@@ -23,17 +23,18 @@ class MessageCreate(BaseModel):
 
 
 class MessageResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     chat_id: int
     content: str
     role: str
     created_at: datetime
-    
-    class Config:
-        from_attributes = True
 
 
 class DocumentUploadResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     filename: str
     uploaded_at: datetime
@@ -41,9 +42,6 @@ class DocumentUploadResponse(BaseModel):
     num_chunks: int
     query_enabled: bool
     collection_name: str
-    
-    class Config:
-        from_attributes = True
 
 
 class DocumentPreferenceUpdate(BaseModel):

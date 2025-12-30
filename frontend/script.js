@@ -1,16 +1,28 @@
-// API Configuration
-// Note: For production, set API_BASE via environment variable or config file
-// Current detection is for development convenience only
-const API_BASE = window.location.hostname === 'localhost' 
+const API_BASE = window.location.hostname === 'localhost'
     ? 'http://localhost:8000'
     : '/api';
 
-// State
+const ErrorMessages = {
+    CHAT_LOAD: 'Failed to load chats',
+    CHAT_CREATE: 'Failed to create chat',
+    CHAT_DELETE: 'Failed to delete chat',
+    MESSAGES_LOAD: 'Failed to load messages',
+    DOCUMENTS_LOAD: 'Failed to load documents',
+    DOCUMENT_UPLOAD: 'Failed to upload document',
+    DOCUMENT_DELETE: 'Failed to delete document',
+    DOCUMENT_REPROCESS: 'Failed to reprocess document',
+    DOCUMENT_UPDATE: 'Failed to update document',
+    QUERY_PREPARE: 'Failed to prepare chat',
+    QUERY_RESPONSE: 'Failed to get response',
+    NO_DOCUMENTS: 'No active documents selected for querying',
+    NETWORK: 'Network error - please check your connection',
+    SERVER: 'Server error - please try again later'
+};
+
 let currentChatId = null;
 let chats = [];
 let documents = [];
 
-// DOM Elements
 const chatList = document.getElementById('chatList');
 const messagesContainer = document.getElementById('messagesContainer');
 const queryInput = document.getElementById('queryInput');
@@ -26,14 +38,11 @@ const loadingOverlay = document.getElementById('loadingOverlay');
 const loadingText = document.getElementById('loadingText');
 const toast = document.getElementById('toast');
 
-// Initialize
 document.addEventListener('DOMContentLoaded', () => {
-    loadChats();
-    loadDocuments();
+    Promise.all([loadChats(), loadDocuments()]).catch(console.error);
     setupEventListeners();
 });
 
-// Event Listeners
 function setupEventListeners() {
     newChatBtn.addEventListener('click', createNewChat);
     sendBtn.addEventListener('click', sendQuery);
@@ -41,128 +50,141 @@ function setupEventListeners() {
     fileInput.addEventListener('change', handleFileUpload);
     deleteChatBtn.addEventListener('click', deleteCurrentChat);
     refreshDocsBtn.addEventListener('click', loadDocuments);
-    
+
     queryInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            sendQuery();
+            sendQuery().then();
         }
     });
 }
 
-// API Functions
+class ApiError extends Error {
+    constructor(message, status, detail) {
+        super(message);
+        this.status = status;
+        this.detail = detail;
+    }
+}
+
 async function apiCall(endpoint, method = 'GET', data = null) {
     const options = {
         method,
-        headers: {
-            'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
     };
-    
+
     if (data) {
         options.body = JSON.stringify(data);
     }
-    
-    const response = await fetch(`${API_BASE}${endpoint}`, options);
-    
-    if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || 'Request failed');
+
+    let response;
+    try {
+        response = await fetch(`${API_BASE}${endpoint}`, options);
+    } catch (networkError) {
+        throw new ApiError(ErrorMessages.NETWORK, 0, networkError.message);
     }
-    
+
+    if (!response.ok) {
+        let detail = 'Request failed';
+        try {
+            const errorBody = await response.json();
+            detail = errorBody.detail || detail;
+        } catch (parseError) {}
+
+        if (response.status >= 500) {
+            throw new ApiError(ErrorMessages.SERVER, response.status, detail);
+        }
+        throw new ApiError(detail, response.status, detail);
+    }
+
     return response.json();
 }
 
-// Chat Functions
 async function loadChats() {
     try {
         chats = await apiCall('/chats');
         renderChats();
-        
-        // Auto-select first chat if none is active
+
         if (!currentChatId && chats.length > 0) {
             await selectChat(chats[0].id);
         }
     } catch (error) {
-        showToast('Failed to load chats', 'error');
+        showToast(`${ErrorMessages.CHAT_LOAD}: ${error.detail || error.message}`, 'error');
         console.error(error);
     }
 }
 
 function renderChats() {
     chatList.innerHTML = '';
-    
+
     if (chats.length === 0) {
-        chatList.innerHTML = '<div style="padding: 20px; text-align: center; color: #95a5a6;">No chats yet</div>';
+        chatList.innerHTML = '<div class="empty-state">No chats yet</div>';
         return;
     }
-    
+
     chats.forEach(chat => {
         const chatItem = document.createElement('div');
         chatItem.className = 'chat-item';
         if (chat.id === currentChatId) {
             chatItem.classList.add('active');
         }
-        
+
         const date = new Date(chat.updated_at);
         const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-        
+
         chatItem.innerHTML = `
-            <div class="chat-item-title">${chat.title}</div>
+            <div class="chat-item-title">${escapeHtml(chat.title)}</div>
             <div class="chat-item-date">${dateStr}</div>
         `;
-        
+
         chatItem.addEventListener('click', () => selectChat(chat.id));
         chatList.appendChild(chatItem);
     });
 }
 
 async function createNewChat() {
+    const title = prompt('Enter chat title:', 'New Chat');
+    if (!title) return;
+
     try {
-        const title = prompt('Enter chat title:', 'New Chat');
-        if (!title) return;
-        
         showLoading('Creating chat...');
         const chat = await apiCall('/chats', 'POST', { title });
         chats.unshift(chat);
         renderChats();
-        selectChat(chat.id);
-        hideLoading();
+        await selectChat(chat.id);
         showToast('Chat created successfully', 'success');
     } catch (error) {
-        hideLoading();
-        showToast('Failed to create chat', 'error');
+        showToast(`${ErrorMessages.CHAT_CREATE}: ${error.detail || error.message}`, 'error');
         console.error(error);
+    } finally {
+        hideLoading();
     }
 }
 
 async function selectChat(chatId) {
     currentChatId = chatId;
     const chat = chats.find(c => c.id === chatId);
-    
+
     if (chat) {
         chatTitle.textContent = chat.title;
         deleteChatBtn.style.display = 'block';
     }
-    
+
     renderChats();
     await loadMessages(chatId);
-    
+
     queryInput.disabled = false;
     sendBtn.disabled = false;
 }
 
 async function ensureActiveChat() {
-    // If a chat is already active, nothing to do
     if (currentChatId) return currentChatId;
 
-    // If chats were loaded, pick the first one
     if (chats.length > 0) {
         await selectChat(chats[0].id);
         return currentChatId;
     }
 
-    // Otherwise create a fallback chat so the user can start typing immediately
     try {
         showLoading('Creating chat...');
         const chat = await apiCall('/chats', 'POST', { title: `Chat ${chats.length + 1}` });
@@ -181,11 +203,11 @@ async function loadMessages(chatId) {
         showLoading('Loading messages...');
         const messages = await apiCall(`/chats/${chatId}/messages`);
         renderMessages(messages);
-        hideLoading();
     } catch (error) {
-        hideLoading();
-        showToast('Failed to load messages', 'error');
+        showToast(`${ErrorMessages.MESSAGES_LOAD}: ${error.detail || error.message}`, 'error');
         console.error(error);
+    } finally {
+        hideLoading();
     }
 }
 
@@ -215,32 +237,29 @@ function renderMessages(messages) {
 async function sendQuery() {
     if (!queryInput.value.trim()) return;
 
-    // Make sure there's an active chat, create/select one if needed
     try {
         await ensureActiveChat();
     } catch (error) {
-        showToast('Failed to prepare chat', 'error');
+        showToast(`${ErrorMessages.QUERY_PREPARE}: ${error.detail || error.message}`, 'error');
         console.error(error);
         return;
     }
-    
+
     const query = queryInput.value.trim();
     queryInput.value = '';
     queryInput.disabled = true;
     sendBtn.disabled = true;
-    
-    // Add user message to UI immediately
+
     addMessageToUI('user', query);
 
     try {
         const assistantElements = addMessageToUI('assistant', '');
         await streamQuery(query, assistantElements);
     } catch (error) {
-        const noDocsMessage = 'No active documents selected for querying';
-        if (error?.message && error.message.toLowerCase().includes(noDocsMessage.toLowerCase())) {
-            addAssistantInfoMessage('Bitte aktiviere mindestens ein Dokument in der rechten Liste (grüner Haken), bevor du eine Frage stellst.');
+        if (error.detail?.toLowerCase().includes('no active documents')) {
+            addAssistantInfoMessage('Please enable at least one document in the right panel before asking questions.');
         } else {
-            showToast('Failed to get response', 'error');
+            showToast(`${ErrorMessages.QUERY_RESPONSE}: ${error.detail || error.message}`, 'error');
             console.error(error);
         }
     } finally {
@@ -255,7 +274,7 @@ function addMessageToUI(role, content, sources = null) {
     if (welcomeMsg) {
         welcomeMsg.remove();
     }
-    
+
     const elements = createMessageElement(role, content, { sources });
     messagesContainer.appendChild(elements.messageDiv);
     scrollToBottom();
@@ -273,16 +292,15 @@ function addAssistantInfoMessage(content) {
 
 async function deleteCurrentChat() {
     if (!currentChatId) return;
-    
     if (!confirm('Are you sure you want to delete this chat?')) return;
-    
+
     try {
         showLoading('Deleting chat...');
         await apiCall(`/chats/${currentChatId}`, 'DELETE');
-        
+
         chats = chats.filter(c => c.id !== currentChatId);
         currentChatId = null;
-        
+
         chatTitle.textContent = 'Select a chat or create a new one';
         deleteChatBtn.style.display = 'none';
         messagesContainer.innerHTML = `
@@ -291,50 +309,48 @@ async function deleteCurrentChat() {
                 <p>Upload documents and ask questions about them!</p>
             </div>
         `;
-        
+
         queryInput.disabled = false;
         sendBtn.disabled = false;
-        
+
         renderChats();
-        hideLoading();
         showToast('Chat deleted successfully', 'success');
     } catch (error) {
-        hideLoading();
-        showToast('Failed to delete chat', 'error');
+        showToast(`${ErrorMessages.CHAT_DELETE}: ${error.detail || error.message}`, 'error');
         console.error(error);
+    } finally {
+        hideLoading();
     }
 }
 
-// Document Functions
 async function loadDocuments() {
     try {
         documents = await apiCall('/documents');
         renderDocuments();
     } catch (error) {
-        showToast('Failed to load documents', 'error');
+        showToast(`${ErrorMessages.DOCUMENTS_LOAD}: ${error.detail || error.message}`, 'error');
         console.error(error);
     }
 }
 
 function renderDocuments() {
     documentsList.innerHTML = '';
-    
+
     if (documents.length === 0) {
-        documentsList.innerHTML = '<div style="padding: 20px; text-align: center; color: #7f8c8d;">No documents uploaded</div>';
+        documentsList.innerHTML = '<div class="empty-state">No documents uploaded</div>';
         return;
     }
-    
+
     documents.forEach(doc => {
         const docItem = document.createElement('div');
         docItem.className = 'document-item';
-        
+
         const date = new Date(doc.uploaded_at).toLocaleDateString();
         const isProcessed = doc.processed;
         const status = isProcessed ? 'processed' : 'unprocessed';
-        const statusText = isProcessed ? `✓ ${doc.num_chunks} chunks` : '⚠ Not in vector store';
+        const statusText = isProcessed ? `${doc.num_chunks} chunks` : 'Not processed';
         const queryPillClass = doc.query_enabled ? 'query-pill active' : 'query-pill inactive';
-        const toggleTitle = doc.query_enabled ? 'Included in retrieval' : 'Excluded from retrieval';
-        
+
         docItem.innerHTML = `
             <div class="document-name">${escapeHtml(doc.filename)}</div>
             <div class="document-info-row">
@@ -343,30 +359,30 @@ function renderDocuments() {
             </div>
             <div class="document-status-row">
                 <div class="document-status ${status}">${statusText}</div>
-                <div class="${queryPillClass}">${doc.query_enabled ? 'Query an' : 'Query aus'}</div>
+                <div class="${queryPillClass}">${doc.query_enabled ? 'Query on' : 'Query off'}</div>
             </div>
             <div class="document-actions">
-                ${!isProcessed ? `<button class="btn-reprocess" data-id="${doc.id}">🔄 Reprocess</button>` : ''}
-                <button class="doc-toggle ${doc.query_enabled ? 'active' : ''}" data-id="${doc.id}" aria-pressed="${doc.query_enabled}" title="${toggleTitle}">${doc.query_enabled ? '✔' : ''}</button>
-                <button class="btn-delete-doc" data-id="${doc.id}">🗑️</button>
+                ${!isProcessed ? `<button class="btn-reprocess" data-id="${doc.id}">Reprocess</button>` : ''}
+                <button class="doc-toggle ${doc.query_enabled ? 'active' : ''}" data-id="${doc.id}" aria-pressed="${doc.query_enabled}">${doc.query_enabled ? 'ON' : 'OFF'}</button>
+                <button class="btn-delete-doc" data-id="${doc.id}">Delete</button>
             </div>
         `;
-        
-        // Add event listeners
+
         const reprocessBtn = docItem.querySelector('.btn-reprocess');
         if (reprocessBtn) {
             reprocessBtn.addEventListener('click', () => reprocessDocument(doc.id));
         }
+
         const toggleBtn = docItem.querySelector('.doc-toggle');
         if (toggleBtn) {
             toggleBtn.addEventListener('click', () => toggleDocumentQuery(doc.id, doc.query_enabled));
         }
-        
+
         const deleteBtn = docItem.querySelector('.btn-delete-doc');
         if (deleteBtn) {
             deleteBtn.addEventListener('click', () => deleteDocument(doc.id));
         }
-        
+
         documentsList.appendChild(docItem);
     });
 }
@@ -374,57 +390,41 @@ function renderDocuments() {
 async function reprocessDocument(docId) {
     try {
         showLoading('Reprocessing document...');
-        const response = await fetch(`${API_BASE}/documents/${docId}/reprocess`, {
-            method: 'POST',
-        });
-        
-        if (!response.ok) {
-            throw new Error('Reprocess failed');
-        }
-        
+        await apiCall(`/documents/${docId}/reprocess`, 'POST');
         await loadDocuments();
-        hideLoading();
         showToast('Document reprocessed successfully', 'success');
     } catch (error) {
-        hideLoading();
-        showToast('Failed to reprocess document', 'error');
+        showToast(`${ErrorMessages.DOCUMENT_REPROCESS}: ${error.detail || error.message}`, 'error');
         console.error(error);
+    } finally {
+        hideLoading();
     }
 }
 
 async function deleteDocument(docId) {
     if (!confirm('Are you sure you want to delete this document?')) return;
-    
+
     try {
         showLoading('Deleting document...');
-        const response = await fetch(`${API_BASE}/documents/${docId}`, {
-            method: 'DELETE',
-        });
-        
-        if (!response.ok) {
-            throw new Error('Delete failed');
-        }
-        
+        await apiCall(`/documents/${docId}`, 'DELETE');
         await loadDocuments();
-        hideLoading();
         showToast('Document deleted successfully', 'success');
     } catch (error) {
-        hideLoading();
-        showToast('Failed to delete document', 'error');
+        showToast(`${ErrorMessages.DOCUMENT_DELETE}: ${error.detail || error.message}`, 'error');
         console.error(error);
+    } finally {
+        hideLoading();
     }
 }
 
 async function toggleDocumentQuery(docId, currentState) {
     try {
         const nextState = !currentState;
-        await apiCall(`/documents/${docId}/preferences`, 'PATCH', {
-            query_enabled: nextState,
-        });
+        await apiCall(`/documents/${docId}/preferences`, 'PATCH', { query_enabled: nextState });
         await loadDocuments();
         showToast(nextState ? 'Document enabled for queries' : 'Document excluded from queries', 'success');
     } catch (error) {
-        showToast(error.message || 'Failed to update document', 'error');
+        showToast(`${ErrorMessages.DOCUMENT_UPDATE}: ${error.detail || error.message}`, 'error');
         console.error(error);
     }
 }
@@ -432,38 +432,41 @@ async function toggleDocumentQuery(docId, currentState) {
 async function handleFileUpload(event) {
     const file = event.target.files[0];
     if (!file) return;
-    
+
     const formData = new FormData();
     formData.append('file', file);
-    
+
     try {
         showLoading('Uploading and processing document...');
-        
+
         const response = await fetch(`${API_BASE}/documents`, {
             method: 'POST',
             body: formData,
         });
-        
+
         if (!response.ok) {
-            throw new Error('Upload failed');
+            let detail = 'Upload failed';
+            try {
+                const errorBody = await response.json();
+                detail = errorBody.detail || detail;
+            } catch (parseError) {}
+            throw new ApiError(detail, response.status, detail);
         }
-        
-        const document = await response.json();
-        documents.unshift(document);
+
+        const doc = await response.json();
+        documents.unshift(doc);
         renderDocuments();
-        
-        hideLoading();
+
         showToast('Document uploaded successfully', 'success');
     } catch (error) {
-        hideLoading();
-        showToast('Failed to upload document', 'error');
+        showToast(`${ErrorMessages.DOCUMENT_UPLOAD}: ${error.detail || error.message}`, 'error');
         console.error(error);
+    } finally {
+        hideLoading();
+        fileInput.value = '';
     }
-    
-    fileInput.value = '';
 }
 
-// Utility Functions
 function showLoading(text = 'Loading...') {
     loadingText.textContent = text;
     loadingOverlay.style.display = 'flex';
@@ -477,35 +480,55 @@ function showToast(message, type = 'info') {
     toast.textContent = message;
     toast.className = `toast ${type}`;
     toast.classList.add('show');
-    
+
     setTimeout(() => {
         toast.classList.remove('show');
-    }, 3000);
+    }, 4000);
 }
 
 function scrollToBottom() {
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
 
+function throttle(func, delay) {
+    let timeoutId;
+    let lastRan;
+    return function(...args) {
+        if (!lastRan) {
+            func.apply(this, args);
+            lastRan = Date.now();
+        } else {
+            clearTimeout(timeoutId);
+            timeoutId = setTimeout(() => {
+                if ((Date.now() - lastRan) >= delay) {
+                    func.apply(this, args);
+                    lastRan = Date.now();
+                }
+            }, delay - (Date.now() - lastRan));
+        }
+    };
+}
+
+const throttledScroll = throttle(scrollToBottom, 100);
+
 function createMessageElement(role, content, options = {}) {
     const { sources = null, timestamp = null } = options;
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${role}`;
 
-    // For assistant messages, add thinking section first (collapsed)
     let thinkingContainer = null;
     if (role === 'assistant') {
         thinkingContainer = document.createElement('details');
         thinkingContainer.className = 'thinking-container';
-        
+
         const thinkingSummary = document.createElement('summary');
-        thinkingSummary.textContent = '🧠 Thinking...';
+        thinkingSummary.textContent = 'Thinking...';
         thinkingContainer.appendChild(thinkingSummary);
-        
+
         const thinkingContent = document.createElement('div');
         thinkingContent.className = 'thinking-content';
         thinkingContainer.appendChild(thinkingContent);
-        
+
         messageDiv.appendChild(thinkingContainer);
     }
 
@@ -561,9 +584,7 @@ function buildSourcesElement(sources) {
 }
 
 function renderMarkdown(text = '') {
-    if (!text) {
-        return '';
-    }
+    if (!text) return '';
     const html = marked.parse(text, { breaks: true });
     return DOMPurify.sanitize(html);
 }
@@ -575,33 +596,24 @@ function escapeHtml(text) {
 }
 
 async function streamQuery(query, assistantElements) {
-    const response = await fetch(`${API_BASE}/query/stream`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            chat_id: currentChatId,
-            query,
-        }),
-    });
+    let response;
+    try {
+        response = await fetch(`${API_BASE}/query/stream`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: currentChatId, query }),
+        });
+    } catch (networkError) {
+        throw new ApiError(ErrorMessages.NETWORK, 0, networkError.message);
+    }
 
     if (!response.ok || !response.body) {
-        let message = 'Streaming request failed';
+        let detail = 'Streaming request failed';
         try {
             const errorPayload = await response.json();
-            if (errorPayload?.detail) {
-                message = errorPayload.detail;
-            }
-        } catch (parseError) {
-            // ignore JSON parse errors and fall back to default message
-        }
-        const error = new Error(message);
-        error.status = response.status;
-        if (message && message.toLowerCase().includes('no active documents selected')) {
-            error.isNoDocuments = true;
-        }
-        throw error;
+            detail = errorPayload.detail || detail;
+        } catch (parseError) {}
+        throw new ApiError(detail, response.status, detail);
     }
 
     const reader = response.body.getReader();
@@ -612,9 +624,7 @@ async function streamQuery(query, assistantElements) {
 
     while (true) {
         const { value, done } = await reader.read();
-        if (done) {
-            break;
-        }
+        if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
 
@@ -623,14 +633,10 @@ async function streamQuery(query, assistantElements) {
             const rawEvent = buffer.slice(0, separatorIndex).trim();
             buffer = buffer.slice(separatorIndex + 2);
 
-            if (!rawEvent.startsWith('data:')) {
-                continue;
-            }
+            if (!rawEvent.startsWith('data:')) continue;
 
             const dataString = rawEvent.replace(/^data:\s*/, '');
-            if (!dataString) {
-                continue;
-            }
+            if (!dataString) continue;
 
             let payload;
             try {
@@ -641,23 +647,20 @@ async function streamQuery(query, assistantElements) {
             }
 
             if (payload.type === 'thinking') {
-                // Handle thinking step
-                const step = payload.step;
-                thinkingSteps.push(step);
+                thinkingSteps.push(payload.step);
                 updateThinkingDisplay(assistantElements, thinkingSteps);
-                scrollToBottom();
+                throttledScroll();
             } else if (payload.type === 'chunk') {
                 if (payload.content) {
                     accumulated += payload.content;
-                    assistantElements.contentDiv.innerHTML = renderMarkdown(accumulated);
-                    scrollToBottom();
+                    assistantElements.contentDiv.textContent = accumulated;
+                    throttledScroll();
                 }
             } else if (payload.type === 'end') {
                 accumulated = payload.content || accumulated;
                 assistantElements.contentDiv.innerHTML = renderMarkdown(accumulated);
-                // Finalize thinking display
                 finalizeThinkingDisplay(assistantElements, thinkingSteps);
-                if (payload.sources && payload.sources.length > 0) {
+                if (payload.sources?.length > 0) {
                     if (assistantElements.sourcesContainer) {
                         assistantElements.sourcesContainer.remove();
                     }
@@ -666,11 +669,7 @@ async function streamQuery(query, assistantElements) {
                 }
                 scrollToBottom();
             } else if (payload.type === 'error') {
-                const error = new Error(payload.message || 'Streaming error');
-                if (payload.message && payload.message.toLowerCase().includes('no active documents selected')) {
-                    error.isNoDocuments = true;
-                }
-                throw error;
+                throw new ApiError(payload.message || 'Streaming error', 500, payload.message);
             }
         }
     }
@@ -678,85 +677,109 @@ async function streamQuery(query, assistantElements) {
 
 function updateThinkingDisplay(assistantElements, thinkingSteps) {
     if (!assistantElements.thinkingContainer) return;
-    
+
     const thinkingContent = assistantElements.thinkingContainer.querySelector('.thinking-content');
     if (!thinkingContent) return;
-    
-    // Update summary to show current step
+
     const summary = assistantElements.thinkingContainer.querySelector('summary');
     const lastStep = thinkingSteps[thinkingSteps.length - 1];
     if (lastStep && summary) {
-        summary.textContent = `🧠 ${lastStep.message}`;
+        summary.textContent = lastStep.message;
     }
-    
-    // Build thinking log
-    let html = '<ul class="thinking-steps">';
-    thinkingSteps.forEach((step, index) => {
-        const icon = getThinkingIcon(step.type);
-        html += `<li class="thinking-step ${step.type}">`;
-        html += `<span class="step-icon">${icon}</span>`;
-        html += `<span class="step-message">${escapeHtml(step.message)}</span>`;
-        
-        // Show details if available
-        if (step.details) {
-            if (Array.isArray(step.details)) {
-                html += '<ul class="step-details">';
-                step.details.forEach(detail => {
-                    if (typeof detail === 'string') {
-                        html += `<li>${escapeHtml(detail)}</li>`;
-                    } else if (detail.text && detail.score !== undefined) {
-                        html += `<li><span class="score">[${detail.score.toFixed(3)}]</span> ${escapeHtml(detail.text)}</li>`;
-                    } else {
-                        html += `<li>${escapeHtml(JSON.stringify(detail))}</li>`;
-                    }
-                });
-                html += '</ul>';
+
+    let stepsList = thinkingContent.querySelector('.thinking-steps');
+    if (!stepsList) {
+        stepsList = document.createElement('ul');
+        stepsList.className = 'thinking-steps';
+        thinkingContent.appendChild(stepsList);
+    }
+
+    const step = lastStep;
+    const icon = getThinkingIcon(step.type);
+
+    const li = document.createElement('li');
+    li.className = `thinking-step ${step.type}`;
+
+    const iconSpan = document.createElement('span');
+    iconSpan.className = 'step-icon';
+    iconSpan.textContent = icon;
+    li.appendChild(iconSpan);
+
+    const messageSpan = document.createElement('span');
+    messageSpan.className = 'step-message';
+    messageSpan.textContent = step.message;
+    li.appendChild(messageSpan);
+
+    if (step.details && Array.isArray(step.details)) {
+        const detailsList = document.createElement('ul');
+        detailsList.className = 'step-details';
+
+        step.details.forEach(detail => {
+            const detailLi = document.createElement('li');
+            if (typeof detail === 'string') {
+                detailLi.textContent = detail;
+            } else if (detail.text && detail.score !== undefined) {
+                const scoreSpan = document.createElement('span');
+                scoreSpan.className = 'score';
+                scoreSpan.textContent = `[${detail.score.toFixed(3)}]`;
+                detailLi.appendChild(scoreSpan);
+                detailLi.appendChild(document.createTextNode(` ${detail.text}`));
+            } else {
+                detailLi.textContent = JSON.stringify(detail);
             }
-        }
-        
-        html += '</li>';
-    });
-    html += '</ul>';
-    
-    thinkingContent.innerHTML = html;
+            detailsList.appendChild(detailLi);
+        });
+
+        li.appendChild(detailsList);
+    }
+
+    stepsList.appendChild(li);
 }
 
 function finalizeThinkingDisplay(assistantElements, thinkingSteps) {
     if (!assistantElements.thinkingContainer) return;
-    
+
     const summary = assistantElements.thinkingContainer.querySelector('summary');
     if (summary) {
-        const stepCount = thinkingSteps.length;
-        summary.textContent = `🧠 Thinking (${stepCount} steps) - click to expand`;
+        summary.textContent = `Thinking (${thinkingSteps.length} steps) - click to expand`;
     }
-    
-    // Collapse the thinking section after completion
+
     assistantElements.thinkingContainer.removeAttribute('open');
 }
 
 function getThinkingIcon(stepType) {
     const icons = {
-        'start': '🚀',
-        'generating_queries': '✍️',
-        'queries_generated': '📝',
-        'searching': '🔍',
-        'search_complete': '✅',
-        'deduplication': '🔄',
-        'reranking': '⚖️',
-        'rerank_complete': '📊',
-        'loading_parents': '📂',
-        'complete': '✅',
-        'no_results': '❌',
-        'low_score': '⚠️',
-        'retry_start': '🔁',
-        'retry_queries_generated': '📝',
-        'retry_searching': '🔍',
-        'retry_deduplication': '🔄',
-        'retry_reranking': '⚖️',
-        'retry_rerank_complete': '📊',
-        'retry_loading_parents': '📂',
-        'retry_complete': '✅',
-        'retry_no_results': '❌'
+        'start': '>',
+        'round1_start': '1',
+        'round2_start': '2',
+        'round3_start': '3',
+        'generating_queries': 'Q',
+        'queries_generated': 'Q',
+        'searching': 'S',
+        'search_complete': 'S',
+        'deduplication': 'D',
+        'round1_dedup': 'D',
+        'round2_dedup': 'D',
+        'round3_dedup': 'D',
+        'round1_reranking': 'R',
+        'round2_reranking': 'R',
+        'round3_reranking': 'R',
+        'reranking': 'R',
+        'rerank_complete': 'R',
+        'round1_score': '#',
+        'round2_score': '#',
+        'round3_score': '#',
+        'round1_success': '+',
+        'round2_success': '+',
+        'round1_acceptable': '+',
+        'round2_final': '!',
+        'round1_no_results': 'X',
+        'no_results_final': 'X',
+        'loading_parents': 'P',
+        'complete': '*',
+        'no_results': 'X',
+        'no_documents': '!',
+        'metadata_injection': 'M'
     };
-    return icons[stepType] || '•';
+    return icons[stepType] || '-';
 }

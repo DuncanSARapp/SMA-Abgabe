@@ -13,15 +13,12 @@
 </head>
 <body>
     <div class="container">
-        <!-- Sidebar -->
         <div class="sidebar">
             <div class="sidebar-header">
                 <h2>RAG Chat System</h2>
                 <button id="newChatBtn" class="btn-primary">+ New Chat</button>
             </div>
-            
             <div class="chat-list" id="chatList">
-                <!-- Chat items will be populated here -->
             </div>
             
             <div class="sidebar-footer">
@@ -29,8 +26,6 @@
                 <input type="file" id="fileInput" style="display: none;" accept=".pdf,.txt,.md,.docx">
             </div>
         </div>
-
-        <!-- Main Chat Area -->
         <div class="main-content">
             <div class="chat-header">
                 <h3 id="chatTitle">Select a chat or create a new one</h3>
@@ -38,7 +33,6 @@
             </div>
 
             <div class="messages-container" id="messagesContainer">
-                <!-- Messages will be populated here -->
                 <div class="welcome-message">
                     <h2>Welcome to RAG Chat System</h2>
                     <p>Upload documents and ask questions about them!</p>
@@ -49,9 +43,8 @@
                     </ol>
                 </div>
             </div>
-
             <div class="input-area">
-                <textarea 
+                <label for="queryInput"></label><textarea
                     id="queryInput" 
                     placeholder="Ask a question about your documents..."
                     rows="3"
@@ -59,26 +52,20 @@
                 <button id="sendBtn" class="btn-send">Send</button>
             </div>
         </div>
-
-        <!-- Documents Panel -->
         <div class="documents-panel">
             <div class="panel-header">
                 <h3>📚 Documents</h3>
                 <button id="refreshDocsBtn" class="btn-icon">🔄</button>
             </div>
             <div class="documents-list" id="documentsList">
-                <!-- Documents will be populated here -->
             </div>
         </div>
     </div>
-
-    <!-- Loading Overlay -->
     <div id="loadingOverlay" class="loading-overlay" style="display: none;">
         <div class="spinner"></div>
         <p id="loadingText">Processing...</p>
     </div>
 
-    <!-- Toast Notifications -->
     <div id="toast" class="toast"></div>
 
     <script src="script.js"></script>

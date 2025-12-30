@@ -1,213 +1,155 @@
+import logging
 import os
 import pickle
-import logging
-from typing import List, Dict, Any, Tuple
-from langchain.text_splitter import (
-    MarkdownHeaderTextSplitter,
-    RecursiveCharacterTextSplitter,
+from typing import List, Dict, Any, Optional
+
+from docling_core.transforms.chunker import HybridChunker
+from docling_core.transforms.chunker.hierarchical_chunker import (
+    ChunkingDocSerializer,
+    ChunkingSerializerProvider,
 )
-from config.settings import settings
+from docling_core.transforms.serializer.markdown import MarkdownTableSerializer
+from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
+from transformers import AutoTokenizer
+from .settings import settings
 
 logger = logging.getLogger(__name__)
 
 
+class MarkdownTableSerializerProvider(ChunkingSerializerProvider):
+    """Serialisiert Tabellen als Markdown (RAG-optimiert)"""
+
+    def get_serializer(self, doc):
+        return ChunkingDocSerializer(
+            doc=doc,
+            table_serializer=MarkdownTableSerializer(),
+        )
+
+
+def load_parent_document(pickle_path: Optional[str], parent_id: int) -> str:
+    """
+    Lädt Parent-Dokument aus Pickle-Datei
+    Wird von rag_service.py für Neighbor-Expansion benötigt
+    """
+    if not pickle_path:
+        return ""
+
+    try:
+        with open(pickle_path, 'rb') as f:
+            parent_docs = pickle.load(f)
+
+        if parent_id < len(parent_docs):
+            return parent_docs[parent_id]
+        return ""
+
+    except FileNotFoundError:
+        logger.error(f"Parent document file not found: {pickle_path}")
+        return ""
+    except Exception as exc:
+        logger.error(f"Error loading parent document from {pickle_path}: {exc}")
+        return ""
+
+
 class DocumentProcessor:
-    """Service for processing and chunking documents with metadata extraction"""
-    
+    """
+    Verarbeitet Dokumente mit Parent-Child-Chunking
+    Nutzt Markdown Table Serializer für bessere Tabellen-Darstellung
+    """
+
     def __init__(self):
-        parent_overlap = getattr(settings, "parent_chunk_overlap", None) or settings.chunk_overlap
-        child_overlap = getattr(settings, "child_chunk_overlap", None) or settings.chunk_overlap
+        embed_model = settings.embedding_model
 
-        self.heading_keys = ["h1", "h2", "h3", "h4", "h5", "h6"]
-        self.header_splitter = MarkdownHeaderTextSplitter(
-            headers_to_split_on=[
-                ("#", "h1"),
-                ("##", "h2"),
-                ("###", "h3"),
-                ("####", "h4"),
-                ("#####", "h5"),
-                ("######", "h6"),
-            ]
+        # HuggingFace Tokenizer für Chunking
+        self.tokenizer = HuggingFaceTokenizer(
+            tokenizer=AutoTokenizer.from_pretrained(embed_model),
+            max_tokens=settings.chunk_size,
         )
-        self.parent_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=settings.parent_chunk_size,
-            chunk_overlap=parent_overlap,
-            length_function=len,
+
+        # HybridChunker mit Markdown Table Serializer
+        self.chunker = HybridChunker(
+            tokenizer=self.tokenizer,
+            serializer_provider=MarkdownTableSerializerProvider(),
         )
-        self.child_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=settings.chunk_size,
-            chunk_overlap=child_overlap,
-            length_function=len,
+
+        logger.info(
+            f"DocumentProcessor initialized with HybridChunker "
+            f"(max_tokens={settings.chunk_size}, markdown_tables=True)"
         )
-    
-    def _segment_sections(self, text: str) -> List[Dict[str, str]]:
-        """Segment document into sections based on markdown headings."""
-        documents = self.header_splitter.split_text(text)
-        sections: List[Dict[str, str]] = []
 
-        for doc in documents:
-            content = doc.page_content.strip()
-            if not content:
-                continue
-
-            metadata = doc.metadata or {}
-            heading_parts = [
-                metadata.get(level)
-                for level in self.heading_keys
-                if metadata.get(level)
-            ]
-            heading_path = " / ".join(heading_parts) if heading_parts else "Body"
-
-            sections.append({
-                "heading": heading_path,
-                "content": content,
-            })
-
-        if not sections:
-            sections.append({"heading": "Body", "content": text.strip()})
-
-        return sections
-
-    def _build_parent_chunks(
-        self, sections: List[Dict[str, str]]
-    ) -> Tuple[List[str], List[str]]:
-        """Build parent chunks while respecting section boundaries."""
-        parent_docs: List[str] = []
-        parent_sections: List[str] = []
-
-        for section in sections:
-            content = section.get("content", "").strip()
-            heading_path = section.get("heading", "Body")
-
-            if not content:
-                continue
-
-            splits = self.parent_splitter.split_text(content)
-            for split in splits:
-                chunk_text = (
-                    f"{heading_path}\n\n{split}".strip()
-                    if heading_path != "Body"
-                    else split.strip()
-                )
-                parent_docs.append(chunk_text)
-                parent_sections.append(heading_path)
-
-        return parent_docs, parent_sections
-    
-    def _determine_position(self, chunk_index: int, total_chunks: int) -> str:
-        """Determine if chunk is at beginning, middle, or end of document"""
-        if total_chunks <= 1:
-            return "full"
-        
-        relative_pos = chunk_index / total_chunks
-        if relative_pos < 0.2:
-            return "beginning"
-        elif relative_pos > 0.8:
-            return "end"
-        else:
-            return "middle"
-    
-    
     def process_document(
-        self, 
-        doc_id: int, 
-        text: str, 
-        pickle_path: str,
-        document_name: str = "",
-        metadata_chunk: str = None
+            self,
+            doc_id: int,
+            text: str,
+            pickle_path: str,
+            document_name: str = "",
+            metadata_chunk: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """
-        Process document using parent-child chunking strategy with metadata
-        
-        Args:
-            doc_id: Document ID
-            text: Full document text
-            pickle_path: Path to save parent documents
-            document_name: Original filename for metadata
-            metadata_chunk: Optional pre-extracted metadata chunk to prepend
-            
-        Returns:
-            List of child chunks with parent_id references and metadata
-        """
-        # Extract section structure (works best for markdown, but provides fallback for others)
-        sections = self._segment_sections(text)
-        
-        # Create parent documents while keeping heading metadata
-        parent_docs, parent_sections = self._build_parent_chunks(sections)
-        
-        # If we have a metadata chunk, prepend it as parent_id -1 (special metadata parent)
+        parent_size = settings.parent_chunk_size
+        parent_overlap = settings.parent_chunk_overlap or settings.chunk_overlap
+
+        parent_docs = []
+        for start in range(0, len(text), parent_size - parent_overlap):
+            parent_chunk = text[start:start + parent_size]
+            if parent_chunk.strip():
+                parent_docs.append(parent_chunk)
+
+        # Metadata-Chunk als Parent 0 (falls vorhanden)
         if metadata_chunk:
             parent_docs_with_meta = [metadata_chunk] + parent_docs
         else:
             parent_docs_with_meta = parent_docs
-        
-        # Save parent documents to pickle file (including metadata chunk)
+
+        # Speichere Parent-Dokumente für Neighbor-Expansion
         os.makedirs(os.path.dirname(pickle_path), exist_ok=True)
         with open(pickle_path, 'wb') as f:
             pickle.dump(parent_docs_with_meta, f)
-        
-        # Create child chunks with metadata
+
         chunks = []
         chunk_counter = 0
-        
-        # Add metadata chunk as a special searchable chunk (if present)
+
+        # Metadata-Chunk
         if metadata_chunk:
             chunks.append({
                 'text': metadata_chunk,
-                'parent_id': 0,  # Metadata is parent 0
+                'parent_id': 0,
                 'doc_id': doc_id,
                 'document_name': document_name,
                 'section': 'Document Metadata',
                 'position': 'metadata',
                 'chunk_index': chunk_counter,
-                'chunk_id': -1,  # Ensure metadata chunk has unique chunk_id
                 'is_metadata': True
             })
-            # Offset for regular chunks
             parent_offset = 1
             chunk_counter += 1
         else:
             parent_offset = 0
-        
-        total_parent_docs = len(parent_docs)
-        
-        for parent_id, parent_text in enumerate(parent_docs):
-            child_texts = self.child_splitter.split_text(parent_text)
-            
-            section = (
-                parent_sections[parent_id]
-                if parent_id < len(parent_sections)
-                else "Body"
-            )
-            position = self._determine_position(parent_id, total_parent_docs)
 
-            for child_text in child_texts:
-                chunks.append({
-                    'text': child_text,
-                    'parent_id': parent_id + parent_offset,  # Offset by 1 if metadata exists
-                    'doc_id': doc_id,
-                    'document_name': document_name,
-                    'section': section,
-                    'position': position,
-                    'chunk_index': chunk_counter,
-                    'is_metadata': False
-                })
-                chunk_counter += 1
-        
+        # Child-Level: Kleine Chunks (für Retrieval)
+        child_size = settings.child_chunk_size or settings.chunk_size
+        child_overlap = settings.child_chunk_overlap or settings.chunk_overlap
+
+        for parent_id, parent_text in enumerate(parent_docs):
+            # Erstelle Child-Chunks aus jedem Parent
+            for start in range(0, len(parent_text), child_size - child_overlap):
+                child_text = parent_text[start:start + child_size]
+
+                if child_text.strip():
+                    chunks.append({
+                        'text': child_text,
+                        'parent_id': parent_id + parent_offset,
+                        'doc_id': doc_id,
+                        'document_name': document_name,
+                        'section': 'Body',
+                        'position': 'middle',
+                        'chunk_index': chunk_counter,
+                        'is_metadata': False
+                    })
+                    chunk_counter += 1
+
         logger.info(
-            "Processed document %s: %d parent chunks, %d child chunks%s",
-            document_name, len(parent_docs), len(chunks),
-            " (with metadata)" if metadata_chunk else ""
+            f"Processed document {document_name}: "
+            f"{len(parent_docs)} parent chunks, {len(chunks)} child chunks"
+            f"{' (with metadata)' if metadata_chunk else ''}"
         )
-        
+
         return chunks
-    
-    def load_parent_document(self, pickle_path: str, parent_id: int) -> str:
-        """Load a specific parent document from pickle file"""
-        try:
-            with open(pickle_path, 'rb') as f:
-                parent_docs = pickle.load(f)
-            return parent_docs[parent_id] if parent_id < len(parent_docs) else ""
-        except Exception as e:
-            logger.error(f"Error loading parent document from {pickle_path}: {e}")
-            return ""
